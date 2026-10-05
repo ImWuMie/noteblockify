@@ -1,3 +1,5 @@
+[English](README.md) | [Usage guide](USAGES.md) | [使用指南](USAGES_zh.md)
+
 # noteblockify —— 音频/MIDI 转 Minecraft NBS
 
 把任意歌曲转换成 Minecraft 音符盒谱（.nbs），全部音符落在原版两个八度窗口（F♯3–F♯5）内，每个声部的八度归属由模型决定。

@@ -1,5 +1,7 @@
 # 使用指南
 
+[English README](README.md) | [中文说明](README_zh.md) | [Usage guide](USAGES.md)
+
 ## 安装
 
 ```bash
@@ -111,7 +113,7 @@ uv run python -m noteblockify.octave        # 用 data/midi/*.mid 训练，存 o
 uv run python score_model.py       # 训练集、held-out、转换层三项分数
 ```
 
-仓库不含模型文件——首次 `arrange()` 在训练之前退回纯折叠。
+训练好的模型随仓库附带（`octave.pt`），开箱即用；重训可适配你的曲库。
 往 `data/midi/` 加 MIDI 可以让模型适配你的曲库。
 
 ## 疑难解答

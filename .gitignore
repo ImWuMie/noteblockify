@@ -21,9 +21,10 @@ yuai*.nbs
 .idea/
 .vscode/
 
-# Model checkpoints are artifacts, rebuild with `uv run python -m ipt.octave`
-octave.pt
+# Model checkpoints are artifacts, rebuild with `uv run python -m noteblockify.octave`
+# octave_tf.pt is an experiment artifact; the deployed weighted MLP ships.
 octave_tf.pt
+!octave.pt
 
 # OS
 Thumbs.db

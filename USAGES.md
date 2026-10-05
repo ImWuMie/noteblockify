@@ -1,6 +1,9 @@
 # Usage guide
 
+[English README](README.md) | [中文说明](README_zh.md) | [使用指南](USAGES_zh.md)
+
 ## Install
+
 
 ```bash
 # Requires Python 3.12+, uv, and an NVIDIA GPU for the audio path
@@ -120,8 +123,8 @@ uv run python -m noteblockify.octave        # trains on data/midi/*.mid, saves o
 uv run python score_model.py       # train-set, held-out, and conversion scores
 ```
 
-There is no model file in the repository — the first `arrange()` call
-falls back to pure folding until you train once. Add MIDI files to
+The trained model ships as `octave.pt`; conversions use it out of
+the box. Retrain to specialize to your repertoire. Add MIDI files to
 `data/midi/` to specialize the model to your repertoire.
 
 ## Troubleshooting

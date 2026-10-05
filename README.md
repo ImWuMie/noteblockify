@@ -1,5 +1,8 @@
 # noteblockify — Audio/MIDI to Minecraft NBS
 
+[中文说明](README_zh.md) | [Usage guide](USAGES.md) | [使用指南](USAGES_zh.md)
+
+
 Convert any song into a Minecraft note block song that plays entirely
 inside the two-octave vanilla window (F#3–F#5), with musically sensible
 octave placement per voice.
