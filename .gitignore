@@ -1,0 +1,30 @@
+# Byte-compiled / cache
+__pycache__/
+*.pyc
+.venv/
+
+# Secrets
+.env
+
+# User data: never commit the corpus or personal audio
+data/
+yuai.mp3
+yuai.mid
+yuai.nbs
+yuai*.mid
+yuai*.nbs
+*.mid
+*.nbs
+!data/auto/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+
+# Model checkpoints are artifacts, rebuild with `uv run python -m ipt.octave`
+octave.pt
+octave_tf.pt
+
+# OS
+Thumbs.db
+.DS_Store
