@@ -45,7 +45,7 @@ def _oracle_octaves(midi_path: Path):
     shift that centers the channel's distribution inside the
     instrument's range, snapped to whole octaves.
     """
-    events, programs, tpb, usec = _events(midi_path)
+    events, programs, tpb, usec, _names = _events(midi_path)
     if not events:
         return []
     channels = sorted({e[1] for e in events})

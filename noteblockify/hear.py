@@ -55,7 +55,7 @@ def _midi_events(midi_path: str | Path):
     conversion fidelity rather than rule disagreement.
     """
     path = Path(midi_path)
-    events, programs, tpb, usec = _events(path)
+    events, programs, tpb, usec, _names = _events(path)
     usec = usec or 500_000
     base = min(e[0] for e in events) if events else 0
     channels = sorted({e[1] for e in events})

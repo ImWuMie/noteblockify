@@ -32,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model", default="medium", choices=("small", "medium", "large"),
         help="muscriptor model size for audio transcription (default: medium)")
+    parser.add_argument(
+        "--vocal-instrument", dest="vocal", type=int, default=None,
+        metavar="0-15",
+        help="vanilla instrument for transcribed vocal tracks "
+             "(voice/vocal/lead; 7=bell, 15=pling, 6=flute default)")
     args = parser.parse_args(argv)
 
     source = Path(args.source)
@@ -56,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     from noteblockify.song import arrange
 
     try:
-        song = arrange(midi)
+        song = arrange(midi, vocal_instrument=args.vocal)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

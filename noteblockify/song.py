@@ -164,11 +164,17 @@ def _events(path: Path):
     micsecqn = 0
     programs = [0] * 16
     events = []
+    # Track names on the events' channels (muscriptor labels the vocal
+    # track 'voice'); used to give the vocal its own instrument.
+    names: dict[int, str] = {}
     for track in mid.tracks:
         pos = 0
+        track_name = ""
         for msg in track:
             pos += msg.time
-            if msg.type == "set_tempo":
+            if msg.type == "track_name":
+                track_name = msg.name.lower()
+            elif msg.type == "set_tempo":
                 if micsecqn == 0:
                     micsecqn = msg.tempo
             elif msg.type == "program_change":
@@ -176,10 +182,12 @@ def _events(path: Path):
             elif msg.type == "note_on" and msg.velocity > 0:
                 if msg.channel == 9 and not 24 <= msg.note <= 84:
                     continue
+                if track_name:
+                    names[msg.channel] = track_name
                 events.append((pos, msg.channel, msg.note, msg.velocity))
     if not micsecqn:
         micsecqn = 500_000
-    return events, programs, tpb, micsecqn
+    return events, programs, tpb, micsecqn, names
 
 
 def _fold(key: int, center: int | None = None) -> int:
@@ -305,9 +313,9 @@ def _tempo_and_ticks(events, tpb, micsecqn):
     return tempo, ticks
 
 
-def arrange(midi_path: str | Path) -> pynbs.File:
+def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs.File:
     path = Path(midi_path)
-    events, programs, tpb, micsecqn = _events(path)
+    events, programs, tpb, micsecqn, names = _events(path)
     if not events:
         song = pynbs.new_file(song_name=path.stem or "song",
                               song_origin=path.name)
@@ -323,6 +331,14 @@ def arrange(midi_path: str | Path) -> pynbs.File:
     prepared = []
     channels = sorted({e[1] for e in events})
     choice = _diversify(programs, channels)
+    # Vocal override: channels whose muscriptor track name marks a vocal
+    # (voice/vocal/lead) get the requested vanilla instrument instead of
+    # the GM map's pick, and a velocity boost so the melody carries.
+    if vocal_instrument is not None:
+        for c in channels:
+            if c != 9 and any(word in names.get(c, "")
+                              for word in ("voice", "vocal", "lead")):
+                choice[c] = vocal_instrument
     for pos, ch, note, vel in events:
         if ch == 9:
             instrument, key = _DRUM[note]
