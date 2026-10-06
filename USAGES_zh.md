@@ -1,134 +1,252 @@
-# 使用指南
+# 详细使用指南
 
-[English README](README.md) | [中文说明](README_zh.md) | [Usage guide](USAGES.md)
+[README](README.md) · [中文说明](README_zh.md) · [English usage](USAGES.md)
 
-## 安装
+## 1. 安装
 
-```bash
-# 需要 Python 3.12+、uv；音频路径需要 NVIDIA GPU
+要求：
+
+- Python 3.12 或更新版本
+- `uv`
+- 音频转录推荐 NVIDIA GPU
+
+```powershell
 uv sync
 ```
 
-依赖：torch（pyproject 里钉了 CUDA 12.8 源）、muscriptor、mido、pynbs。
-纯 MIDI 转换在 CPU 上就能跑；只有音频转录需要 GPU（medium 模型约 5 GB 显存）。
+Windows/Linux 会从 CUDA 12.8 源安装 PyTorch。MIDI 转换和音域模型可以在 CPU
+运行；音频转录使用 CUDA 会快很多。MuScriptor 模型可能需要 Hugging Face token
+并接受对应模型的许可。
 
-## 音频转 NBS
+检查安装：
 
-```bash
-# 第一阶段：输出裸转换基线
-noteblockify --in song.mp3               # 输出 song.pre.nbs
-noteblockify --in song.mp3 --out out.pre.nbs
-noteblockify --in song.mp3 --model small # 更小的转录模型
-# 第二阶段：读取裸文件并做 MC 约束优化
-noteblockify --in song.pre.nbs --stage model # 输出 song.model.nbs
-# 生成多个合法候选供人工 A/B
-noteblockify --in song.pre.nbs --stage model --candidates --out candidates/
+```powershell
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+uv run noteblockify --help
 ```
 
-执行步骤：
+## 2. 一条命令转换
 
-1. muscriptor `medium` 把音频转录成 MIDI（有缓存：.mid 已存在则直接复用）。
-2. `noteblockify.song.arrange_pre` 把 MIDI 转成裸 `.pre.nbs`。
-3. `--stage model` 读取已经落盘的 `.pre.nbs`，用声部连续性解码器为每个音选择同音级的合法八度。
+MIDI：
 
-首次转录约每 4 分钟音频耗时 2 分钟。
-
-## 转换 MIDI 文件
-
-单个文件：
-
-```bash
-noteblockify --in song.mid
+```powershell
+uv run noteblockify `
+  --in "song.mid" `
+  --stage model `
+  --ranker mc_ranker.auto.best.pt `
+  --out "song.nbs"
 ```
 
-整个目录：
+音频：
 
-```bash
-for f in data/midi/*.mid; do noteblockify --in "$f"; done
+```powershell
+uv run noteblockify `
+  --in "song.mp3" `
+  --stage model `
+  --ranker mc_ranker.auto.best.pt `
+  --out "song.nbs"
 ```
 
-编程接口：
+音频路径：
 
-```python
-import pynbs
-from noteblockify.mc_model import refine
-from noteblockify.song import arrange_pre
-
-pre = arrange_pre("song.mid")
-pre.save("song.pre.nbs")
-model = refine(pynbs.read("song.pre.nbs"))
-model.save("song.model.nbs")
+```text
+音频 -> MuScriptor 转录 MIDI -> OpenNBS 裸转换 -> 声部平滑 MC 约束 -> NBS
 ```
 
-## 转换器对你的音乐做了什么
+转录结果缓存在输入旁边的 `<name>.mid`。用 `--model small`、`--model medium`
+或 `--model large` 选择 MuScriptor 转录模型。
 
-| 情况 | 处理方式 |
-|---|---|
-| 裸转换阶段 | 保留 OpenNBS 映射的原始键位，出窗音也不改 |
-| MC 约束阶段 | 每个声部选择合法的同音级八度，窗口内的音也可以切换到另一合法八度 |
-| 模型优化目标 | 最小化八度移动，保持声部局部旋律线，避免同拍同音 |
-| 音符、tick、乐器、层、力度、声像 | 全部保留，不删除 |
-| GM 音色 | 按 OpenNBS 128 项表映射，通道级音色差异化 |
-| 鼓通道（10） | 按 OpenNBS GM 鼓件表映射 |
-| 同时发声数超过层数 | 自动加层——零丢音 |
-| 歌曲超过 65535 tick | 按比例重排网格（相对时值保留） |
-| 多个速度事件 | 第一个生效（OpenNBS 行为） |
+`--ranker mc_ranker.auto.best.pt` 可省略。不传权重时使用确定性的声部平滑解码器。
+仓库包含的权重是当前音域排序模型，不是增删音符编辑模型。
 
-## 给转换结果打分
+## 3. 两阶段转换
+
+需要试听裸基线或检查中间结果时：
+
+```powershell
+uv run noteblockify --in "song.mid" --stage pre --out "song.pre.nbs"
+uv run noteblockify --in "song.pre.nbs" --stage model --ranker mc_ranker.auto.best.pt --out "song.nbs"
+```
+
+`pre.nbs` 不保证所有音都能由原版 Minecraft 音符盒播放。它保留 OpenNBS 映射后的
+原始 key，包括 `33–57` 以外的音，是检查 MIDI 转录和音色映射是否正确的基线。
+
+## 4. 音域算法
+
+Minecraft 阶段的硬约束：
+
+```text
+33 <= NBS key <= 57
+```
+
+对于每条原始声部，解码器会：
+
+1. 生成全部合法的同音级八度候选。
+2. 对完整声部序列进行动态规划。
+3. 惩罚旋律轮廓误差和八度/音域切换。
+4. 考虑其他声部的同拍同音冲突。
+5. 多轮遍历声部，让通道间的选择互相协调。
+
+这是声部级决策。一个低音无法放进 MC 窗口时，不会只把该音单独抬高，而是允许周围
+乐句一起移动到同一合法八度，避免最近八度折叠造成的 `38 -> 43` 反向跳跃。
+
+默认生产阶段只改 key，保留：
+
+```text
+tick、layer、instrument、velocity、panning、音符数量
+```
+
+输出 key 全部在 `33–57` 时，可用于 OpenNBS 和 Meteor。
+
+## 5. 生成候选
+
+传统合法八度候选：
+
+```powershell
+uv run noteblockify --in song.pre.nbs --stage model --candidates --out candidates/
+```
+
+会写出 `balanced`、`nearest`、`low`、`high`、`spread` 等确定性候选。
+
+有限编辑候选：
+
+```powershell
+uv run noteblockify --in song.pre.nbs --stage model --edit-candidates --out edit-candidates/
+```
+
+候选包括：
+
+```text
+balanced、drop、replace、clamp、phrase、smooth、add
+```
+
+编辑候选用于试听和标注，音符数量可能不同。默认生产路径仍然只改 key，不会静默删除音符。
+
+## 6. 训练
+
+### 原有 key-only 排序模型
+
+记录人工 A/B 选择：
+
+```powershell
+uv run noteblockify-feedback `
+  --data data/preferences.jsonl `
+  --pre song.pre.nbs `
+  --preferred candidates/song.high.nbs `
+  --rejected candidates/song.low.nbs `
+  --note "主旋律更清楚"
+```
+
+根据人工偏好训练：
+
+```powershell
+uv run noteblockify-train `
+  --data data/preferences.jsonl `
+  --output mc_ranker.pt
+```
+
+key-only 偏好格式要求音符数量相同，只训练合法同音级八度候选的排序；正常
+`model` 路径仍由声部平滑动态规划负责连续性。
+
+### 可选编辑排序模型
+
+编辑候选音符数量可不同，所以使用单独的训练入口：
+
+```powershell
+uv run noteblockify-feedback `
+  --data data/edit_preferences.jsonl `
+  --pre song.pre.nbs `
+  --preferred edit-candidates/song.replace.nbs `
+  --rejected edit-candidates/song.drop.nbs `
+  --note "replace 更好听"
+
+uv run noteblockify-train-edits `
+  --edit-data data/edit_preferences.jsonl `
+  --output mc_edit_ranker.pt
+```
+
+显式使用编辑模型：
+
+```powershell
+uv run noteblockify `
+  --in song.pre.nbs `
+  --stage model `
+  --edit-ranker mc_edit_ranker.pt `
+  --out song.edit.nbs
+```
+
+不要用自动规则标签代替听感标签。样本偏好错误时，排序器也会稳定地学到错误偏好。
+
+## 7. NBS 与 Meteor 的行为
+
+OpenNBS 格式保存 key、力度、声像和微调音高。Meteor 当前 NBS 解码器会解析文件，
+但实体 NoteBot 演奏只保留乐器和 key：
+
+- per-note 力度被丢弃；
+- per-note 声像被丢弃；
+- per-note 微调音高被丢弃；
+- 立体声感来自方块实际位置；
+- NoteBot 先调音，再按 20 游戏刻的时间网格敲击方块。
+
+因此 `--pitch` 不是 Meteor 的解决方案，只对会读取 NBS 微调字段的播放器有用。
+
+把最终文件放到：
+
+```text
+.minecraft/meteor-client/notebot/
+```
+
+Meteor 支持经典 NBS 和 OpenNBS v5。Exact Instruments 模式下，周围音符盒必须
+提供所需原版乐器。实体布置缺少某些乐器/key 组合时，NoteBot 会报告 missing notes。
+
+## 8. 评分
 
 ```python
 from noteblockify.hear import compare
 
 score = compare("song.mid", "song.nbs")
-print(score.f1, score.instrument, score.total)   # 各 0..1
+print(score.f1, score.instrument, score.total)
 ```
 
-- `f1` —— 按起始时间（±60 ms + 漂移容差）和音高（±1 半音）匹配的音符 F1
-- `instrument` —— 匹配音符中携带正确原版乐器的比例
-- `total` —— 加权 0.6·f1 + 0.4·instrument
+这是客观转换检查，不是音乐质量评判：
 
-规整 MIDI 的忠实转换约 0.99；最后一点差额是 tick 网格量化。
+- `f1`：按时间、音级和事件存在性一对一匹配音符；
+- `instrument`：原版映射乐器的一致率；
+- `total`：`0.6 * f1 + 0.4 * instrument`。
 
-## 在 Minecraft 里播放（Meteor Client）
+它无法判断哪个合法八度更好听。这个问题要通过 OpenNBS/Meteor 实际试听决定。
 
-1. 把 `.nbs` 拷进 `.minecraft/meteor-client/notebot/`。
-2. 在身边摆音符盒（NoteBot 扫触达范围内 6³ 区域），启用 Notebot 模块并加载歌曲。
-3. 模块会先把音符盒调音到目标音高，然后靠攻击方块演奏。
+## 9. 疑难解答
 
-游戏内限制（已核对 Meteor 解码器源码）：
+### 转换后出现反向八度跳跃
 
-- **力度被忽略** —— 解码器读掉 per-note 力度字节后丢弃，所有音全音量。
-- **声像被忽略** —— 立体声来自方块的实际物理位置。
-- **精确乐器模式** —— NoteBot 按乐器类型匹配音符盒；确保你有对应乐器类型的方块
-  （harp/bass/drum/……由音符盒下方方块决定）。
-- **时序抖动** —— Meteor 以 20 游戏刻/秒重算时间，亚 tick 放置会有 ±1 tick（约 50 ms）舍入。
-  所有 NBS 文件都受此限制。
+使用当前声部平滑 `model` 路径，不要继续播放启用新解码器之前生成的旧 `.model.nbs`。
+从原始 MIDI 或 `.pre.nbs` 重新生成：
 
-## 模型训练
-
-解码器先生成硬约束合法候选，再由 PyTorch 排序器在声部动态规划中逐音选择。
-原始音域较低的声部会被分配到较低的合法八度，避免多轨歌曲的低音全部挤到中音区。
-没有 `mc_ranker.pt` 时回退到确定性的 `balanced` 候选。GPU 可用时自动使用 CUDA：
-
-```bash
-noteblockify-train --midi-guided data/flitered \\
-  --output mc_ranker.pt --width 192 --depth 4
-noteblockify-feedback --data data/preferences.jsonl \\
-  --pre song.pre.nbs \\
-  --preferred candidates/song.high.nbs \\
-  --rejected candidates/song.low.nbs \\
-  --note "主旋律更清楚"
-noteblockify-train --data data/preferences.jsonl \\
-  --init mc_ranker.pt --output mc_ranker.pt
+```powershell
+uv run noteblockify --in song.mid --stage model --ranker mc_ranker.auto.best.pt --out song.nbs
 ```
 
-自动目标结合 MIDI 接近度、旋律线条和低音分离，不等于人工听感真值；有人工
-A/B 标签时仍应继续训练。`.pre.nbs` 始终保留，作为不变的听感基线。
+### 音频转录失败
 
-## 疑难解答
+在 `.env` 设置 `HF_TOKEN`，接受 MuScriptor 模型许可后重试。CUDA 显存不足时，
+改用 `--model small`，或在 CPU 上进行转录。
 
-- **`ValueError: every note was dropped`** —— 整首歌都是窗口以下的低音，
-  原版音符盒无法表示。
-- **muscriptor 模型下载失败** —— 在 `.env` 里设 `HF_TOKEN`，
-  并先在 HuggingFace 接受 MuScriptor 模型许可。
-- **CUDA 显存不足** —— 改用 MIDI 输入，或用 CPU 转录（慢很多）。
+### NoteBot 无法加载输出
+
+确认文件是有效 NBS，并且所有 key 位于 `33–57`：
+
+```powershell
+uv run python -c "import pynbs; s=pynbs.read('song.nbs'); assert all(33<=n.key<=57 for n in s.notes); print(len(s.notes),len(s.layers))"
+```
+
+### `add.nbs` 候选损坏
+
+使用独立层修复之后重新生成的输出。多个新增音符绝不能在同一个 tick 共用同一个 NBS layer。
+
+## 10. 验证
+
+```powershell
+uv run python -m py_compile noteblockify/*.py
+uv run python -m pytest tests/ -q
+```

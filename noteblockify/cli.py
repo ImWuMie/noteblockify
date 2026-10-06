@@ -5,9 +5,9 @@ Two stages, two files:
   1. ``--stage pre``  (default) — the pure conversion: OpenNBS maps,
      window folding, layers, tempo. Nothing learned, nothing thinned.
      Writes ``<name>.pre.nbs``.
-  2. ``--stage model`` — takes an existing ``.pre.nbs`` file and applies
-     the learned preference ranker over hard-valid MC candidates; without
-     weights it uses the deterministic balanced candidate.
+  2. ``--stage model`` — accepts MIDI/audio directly or an existing
+     ``.pre.nbs`` file and applies smooth voice-level MC placement; an
+     optional learned ranker scores legal same-pitch-class octave choices.
      Writes ``<name>.model.nbs``.
 
 Audio inputs (mp3/wav/flac/ogg/m4a) are transcribed to MIDI by
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stage", choices=("pre", "model"), default="pre",
         help="pre: convert MIDI/audio to a raw .pre.nbs (default); model: "
-             "refine an existing .pre.nbs file")
+             "convert directly or refine an existing .pre.nbs file")
     parser.add_argument(
         "--out", dest="target", metavar="FILE", default=None,
         help="output .nbs path (default: <input>.<stage>.nbs)")
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
              "one model output")
     parser.add_argument(
         "--edit-candidates", action="store_true",
-        help="write bounded drop/replace candidates for human A/B labeling")
+        help="write bounded drop/replace/add candidates for human A/B labeling")
     parser.add_argument(
         "--edit-ranker", type=Path, default=None,
         help="learned ranker for bounded note-edit candidates")

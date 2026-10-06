@@ -1,118 +1,173 @@
 # noteblockify — Audio/MIDI to Minecraft NBS
 
-[中文说明](README_zh.md) | [Usage guide](USAGES.md) | [使用指南](USAGES_zh.md)
+[中文说明](README_zh.md) · [Detailed usage](USAGES.md) · [详细使用指南](USAGES_zh.md)
 
+`noteblockify` converts MIDI or audio into `.nbs` songs for Open Note Block
+Studio and Meteor Client's NoteBot. The converter keeps a raw OpenNBS-style
+baseline and a separate Minecraft-compatible voice-placement stage.
 
-Convert any song into a Minecraft note block song that plays entirely
-Convert any song into a Minecraft note block song with an explicit raw
-baseline and a separate MC-constrained refinement stage.
+## Pipeline
 
-Pipeline:
-
-```
-audio (mp3/wav)  ──muscriptor──▶  MIDI  ──pre──▶  raw .pre.nbs
-                                               └─model──▶ .model.nbs
-MIDI file        ──────────────────────────────▶  raw .pre.nbs
+```text
+audio ── MuScriptor ──▶ MIDI ── OpenNBS mapping ──▶ pre ──▶ smooth MC placement ──▶ NBS
+MIDI  ─────────────────▶ MIDI ── OpenNBS mapping ──▶ pre ──▶ smooth MC placement ──▶ NBS
 ```
 
-- **Faithful OpenNBS import core** — the 128-entry GM program map, the
-  GM drum map, 2x time precision grid, and layer band layout are
-  replicated from [OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio)
-  (MIT), so a converted MIDI sounds the way OpenNBS would import it.
-- **Raw pre baseline** — OpenNBS mapping, timing grid, layers, velocity,
-  and panning are preserved. Raw keys outside 33–57 are intentionally
-  left untouched so this file is the most faithful listening reference.
-- **MC-constrained model stage** — reads the saved `.pre.nbs`, changes
-  keys only, and guarantees every result is in 33–57. Every note may choose a
-  legal same-pitch-class octave; dynamic programming keeps each voice in a
-  stable octave/register path, preserves local melodic contour, gives lower
-  raw-register voices lower legal targets, and avoids avoidable same-tick
-  unisons. No notes,
-  onsets, instruments, or layers are deleted.
-- **Optional edit stage** — `--edit-candidates` creates bounded `drop`,
-  `replace`, and source-grounded `add` alternatives for human A/B labeling.
-  These alternatives are not enabled by the legacy key-only ranker.
-- **No dropped notes** — channel layer bands grow as tall as needed;
-  nothing is silently discarded on collision.
-- **Long-song regridding** — songs longer than the 65535-tick limit are
-  proportionally re-gridded instead of failing.
-- **Stereo layer panning** — layers carry the sound field (notes follow
-  their layer), spread across the stereo image.
-- **Objective scoring** — `noteblockify.hear` maps the NBS back to MIDI events
-  and scores note F1 plus instrument agreement, with a drift-aware time
-  tolerance that absorbs the NBS tempo field's quantization.
+The `model` stage can consume MIDI/audio directly; an intermediate `.pre.nbs`
+file is optional.
 
 ## Quick start
 
 ```bash
 uv sync
 
-# Stage 1: transcribe (if needed) and write the raw baseline
-noteblockify --in a.mp3                 # writes a.pre.nbs
-noteblockify --in song.mid              # MIDI converts directly, no GPU
-# Stage 2: refine the saved baseline for Minecraft
-noteblockify --in a.pre.nbs --stage model  # writes a.model.nbs
-# Generate several legal candidates for human A/B listening
-noteblockify --in a.pre.nbs --stage model --candidates --out candidates/
-# Generate note-edit alternatives for the problematic low-register notes
-noteblockify --in a.pre.nbs --stage model --edit-candidates --out edit-candidates/
+# One-step MIDI -> Minecraft-compatible NBS
+uv run noteblockify \
+  --in "song.mid" \
+  --stage model \
+  --ranker mc_ranker.auto.best.pt \
+  --out "song.nbs"
 
+# One-step audio -> NBS; the first run downloads/loads MuScriptor weights
+uv run noteblockify \
+  --in "song.mp3" \
+  --stage model \
+  --ranker mc_ranker.auto.best.pt \
+  --out "song.nbs"
 ```
 
-Batch-convert a folder:
+The checked-in `mc_ranker.auto.best.pt` is the trained placement checkpoint.
+Passing it with `--ranker` enables learned candidate scoring. Without a
+ranker, `model` still runs using the deterministic smooth voice decoder.
+
+For an explicit two-stage workflow:
 
 ```bash
-for f in data/midi/*.mid; do noteblockify --in "$f"; done
+uv run noteblockify --in "song.mid" --stage pre --out "song.pre.nbs"
+uv run noteblockify --in "song.pre.nbs" --stage model \
+  --ranker mc_ranker.auto.best.pt --out "song.nbs"
 ```
 
-The output `.nbs` plays in [Open Note Block Studio](https://opennbs.org/)
-and in Meteor Client's NoteBot (drop it into
-`.minecraft/meteor-client/notebot/`). Note that Meteor ignores velocity
-and panning — see USAGES.md for what survives in-game.
+## Placement behavior
 
-The MC decoder first generates hard-valid candidates, then a PyTorch
-preference ranker chooses among them. Without `mc_ranker.pt` it falls back
-to `balanced`. Record human A/B choices and train it:
+### Raw `pre` stage
+
+- Replicates the OpenNBS GM program map and drum map.
+- Preserves timing grid, channel layer bands, velocity, panning, and raw keys.
+- Does not force keys into Minecraft's two-octave range.
+- Produces the best direct-listening baseline.
+
+### Minecraft `model` stage
+
+Minecraft note blocks represent keys `33–57`. The decoder:
+
+- generates every legal same-pitch-class octave for each source note;
+- solves each voice as a sequence instead of making isolated note decisions;
+- penalizes unnecessary octave/register switches;
+- preserves local melodic direction and voice register;
+- separates dense voices and avoids avoidable same-tick unisons;
+- preserves note count, ticks, instruments, layers, velocity, and panning.
+
+For `224264 - 室内系的TrackMaker`, this changes the problematic Fantasia
+phrase from an octave reversal such as `38 → 43` into a continuous register
+path such as `50 → 43`.
+
+The default production model does **not** add or remove notes. Optional edit
+candidates are a separate human-listening workflow.
+
+## CLI modes
 
 ```bash
-noteblockify-feedback --data data/preferences.jsonl \
+# Raw baseline
+uv run noteblockify --in song.mid --stage pre --out song.pre.nbs
+
+# Smooth deterministic MC placement
+uv run noteblockify --in song.mid --stage model --out song.nbs
+
+# Smooth placement plus the checked-in learned ranker
+uv run noteblockify --in song.mid --stage model \
+  --ranker mc_ranker.auto.best.pt --out song.nbs
+
+# Generate deterministic baseline octave candidates for A/B listening
+uv run noteblockify --in song.pre.nbs --stage model \
+  --candidates --out candidates/
+
+# Generate bounded drop/replace/clamp/phrase/smooth/add alternatives
+uv run noteblockify --in song.pre.nbs --stage model \
+  --edit-candidates --out edit-candidates/
+```
+
+Supported input formats:
+
+```text
+.mid, .midi, .mp3, .wav, .flac, .ogg, .m4a, .pre.nbs
+```
+
+Audio transcription is cached beside the input as `<name>.mid`.
+
+## Optional note-edit workflow
+
+Edit candidates may have different note counts. They are intended for human
+A/B listening, not automatic truth generation:
+
+```bash
+uv run noteblockify-feedback \
+  --data data/edit_preferences.jsonl \
   --pre song.pre.nbs \
-  --preferred candidates/song.high.nbs \
-  --rejected candidates/song.low.nbs \
-  --note "clearer lead"
-noteblockify-train --data data/preferences.jsonl
-```
+  --preferred edit-candidates/song.replace.nbs \
+  --rejected edit-candidates/song.drop.nbs \
+  --note "replace sounds better"
 
-The weights come from human A/B choices, not fabricated automatic labels.
-The raw pre file remains available for direct listening comparison.
-
-For edit candidates, record preferences in a separate JSONL file and train
-the edit ranker; candidates may have different note counts:
-
-```bash
-noteblockify-feedback --data data/edit_preferences.jsonl \\
-  --pre song.pre.nbs \\
-  --preferred edit-candidates/song.replace.nbs \\
-  --rejected edit-candidates/song.drop.nbs
-noteblockify-train-edits --edit-data data/edit_preferences.jsonl \\
+uv run noteblockify-train-edits \
+  --edit-data data/edit_preferences.jsonl \
   --output mc_edit_ranker.pt
+
+uv run noteblockify \
+  --in song.pre.nbs \
+  --stage model \
+  --edit-ranker mc_edit_ranker.pt \
+  --out song.edit.nbs
 ```
+
+The edit stage ranks the generated bounded candidates. It does not invent
+unbounded MIDI events.
+
+## Minecraft and NBS limitations
+
+OpenNBS stores velocity, panning, and fine pitch in modern NBS files. Meteor's
+current NBS decoder reads the instrument and key but discards per-note velocity,
+panning, and fine-pitch fields. Therefore:
+
+- velocity is not audible in Meteor;
+- stereo comes from the physical layout of note blocks, not NBS panning;
+- `--pitch` is useful for OpenNBS-compatible players, but **not** for Meteor
+  physical note-block playback;
+- Meteor's NoteBot tunes and plays physical blocks, so all requested keys must
+  be in the playable `33–57` window.
 
 ## Project layout
 
-| file | role |
+| Path | Role |
 |---|---|
-| `noteblockify/song.py` | converter: OpenNBS maps, folding, layers, tempo |
-| `noteblockify/mc_model.py` | MC-window constrained placement optimizer |
-| `noteblockify/hear.py` | NBS→MIDI event scorer |
-| `noteblockify/cli.py` | `noteblockify` CLI entry point |
-| `tests/test_song.py` | converter and MC-constraint invariants |
+| `noteblockify/song.py` | OpenNBS mapping, timing, layers, tempo |
+| `noteblockify/mc_model.py` | Smooth voice-level MC placement |
+| `noteblockify/preference_model.py` | Learned octave candidate ranker |
+| `noteblockify/edit_model.py` | Optional unequal-length edit ranker |
+| `noteblockify/hear.py` | Objective MIDI/NBS event scorer |
+| `noteblockify/cli.py` | Main CLI |
+| `tests/test_song.py` | Conversion and placement invariants |
+| `mc_ranker.auto.best.pt` | Checked-in trained placement checkpoint |
 
-`sounds/` contains the 16 vanilla instrument OGGs from OpenNBS (MIT)
-used by the scorer and available for preview rendering.
+## Verification
+
+```bash
+uv run python -m pytest tests/ -q
+uv run python -m py_compile noteblockify/*.py
+```
 
 ## License
 
-MIT — see LICENSE. The GM program/drum maps are replicated from
-OpenNBS/NoteBlockStudio (MIT). muscriptor is a third-party dependency;
-audio transcription quality is bounded by it.
+MIT. GM mappings are replicated from
+[OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio).
+MuScriptor is a third-party dependency; audio quality is bounded by its
+transcription output.
