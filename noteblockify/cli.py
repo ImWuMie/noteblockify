@@ -69,6 +69,14 @@ def main(argv: list[str] | None = None) -> int:
     keys = [note.key for note in song.notes]
     assert keys and 0 <= min(keys) and max(keys) <= 87
     song.save(target)
+    info = getattr(song, "octave_info", None)
+    if info:
+        if info["model"]:
+            verdicts = " ".join(f"ch{c}:{s:+d}" for c, s in info["channels"].items())
+            print(f"octave: model-assigned ({len(info['channels'])} voices: {verdicts})")
+        else:
+            print("octave: no model file, pure folding (run "
+                  "`uv run python -m noteblockify.octave` to train)")
     print(f"wrote {target} ({target.stat().st_size} bytes), "
           f"{len(song.notes)} notes, keys {min(keys)}-{max(keys)}, "
           f"tempo {song.header.tempo} tps, {song.header.song_layers} layers")

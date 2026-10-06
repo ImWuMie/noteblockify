@@ -370,6 +370,14 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
             votes[events[i][1]][shift] += 1
     winner = {c: max(counts, key=counts.get)
               for c, counts in votes.items()}
+    # Report how the octave decision was made: model in use, and the
+    # per-channel verdicts after the vote.
+    from pathlib import Path as _Path
+
+    song_octave_info = {
+        "model": (_Path(__file__).resolve().parent.parent / "octave.pt").exists(),
+        "channels": {c: winner[c] for c in sorted(winner)},
+    }
     shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
               for i, shift in enumerate(shifts)]
     prepared = [(inst, key + 12 * shift, vel)
@@ -448,4 +456,5 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
         )
         for c in channels for i in range(prefix[c], prefix[c] + max(1, height[c]))
     ]
+    song.octave_info = song_octave_info
     return song
