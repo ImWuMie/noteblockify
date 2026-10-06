@@ -40,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="print per-voice octave decisions and ranges")
+    parser.add_argument(
+        "--max-per-tick", dest="max_per_tick", type=int, default=4,
+        metavar="N",
+        help="cap simultaneous notes per tick to thin dense transcriptions "
+             "(default: 4; 0 disables)")
     args = parser.parse_args(argv)
 
     source = Path(args.source)
@@ -64,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     from noteblockify.song import arrange
 
     try:
-        song = arrange(midi, vocal_instrument=args.vocal)
+        song = arrange(midi, vocal_instrument=args.vocal,
+                       max_per_tick=args.max_per_tick or None)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

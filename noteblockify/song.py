@@ -312,7 +312,8 @@ def _tempo_and_ticks(events, tpb, micsecqn):
     return tempo, ticks
 
 
-def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs.File:
+def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
+            max_per_tick: int | None = None) -> pynbs.File:
     path = Path(midi_path)
     events, programs, tpb, micsecqn, names = _events(path)
     if not events:
@@ -419,6 +420,7 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
     occupied: set[tuple[int, int]] = set()
     notes = []
     dropped = 0
+    tick_load: dict[int, int] = defaultdict(int)
     for tick, (_pos, ch, _note, _vel), (instrument, key, vel) in zip(
             ticks, events, prepared):
         folded = _fold(key, center[ch])
@@ -428,6 +430,15 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
         if instrument in _BASS and folded - key >= 12:
             dropped += 1
             continue
+        # Density thinning: a wall of simultaneous noteblocks is mud.
+        # Notes arrive in event order, so the first channels through the
+        # band layout keep their place; later stacked extras go. Drums
+        # and voice are laid out first in typical files, so the parts
+        # that carry the song survive.
+        if max_per_tick is not None and tick_load[tick] >= max_per_tick:
+            dropped += 1
+            continue
+        tick_load[tick] += 1
         key = folded
         layer = prefix[ch]
         while (tick, layer) in occupied:
