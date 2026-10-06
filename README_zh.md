@@ -59,7 +59,7 @@ uv run python score_model.py             # 完整评测报告
 | `noteblockify/song.py` | 转换器：OpenNBS 映射、折叠、分层、tempo |
 | `noteblockify/octave.py` | 八度模型、训练、特征 |
 | `noteblockify/hear.py` | NBS→MIDI 事件评分器 |
-| `main.py` | `noteblockify` CLI 入口 |
+| `noteblockify/cli.py` | `noteblockify` CLI 入口 |
 | `score_model.py` | 模型评测脚本 |
 
 `sounds/` 是 OpenNBS（MIT）的 16 个原版乐器 OGG，评分器和预览渲染使用。

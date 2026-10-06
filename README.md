@@ -73,7 +73,7 @@ songs to `data/midi/` and retrain to specialize.
 | `noteblockify/song.py` | converter: OpenNBS maps, folding, layers, tempo |
 | `noteblockify/octave.py` | octave model, training, features |
 | `noteblockify/hear.py` | NBS→MIDI event scorer |
-| `main.py` | `noteblockify` CLI entry point |
+| `noteblockify/cli.py` | `noteblockify` CLI entry point |
 | `score_model.py` | model evaluation harness |
 
 `sounds/` contains the 16 vanilla instrument OGGs from OpenNBS (MIT)
