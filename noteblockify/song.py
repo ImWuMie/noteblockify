@@ -145,12 +145,6 @@ _NAME = [
     "Helicopter", "Applause", "Gunshot",
 ]
 
-# Comfortable playing range per vanilla instrument (inclusive NBS keys).
-_RANGE = {
-    0: (30, 66), 1: (14, 42), 5: (26, 62), 6: (42, 78), 7: (54, 81),
-    8: (54, 81), 9: (54, 81), 10: (42, 78), 11: (42, 66), 12: (26, 50),
-    13: (30, 66), 14: (26, 62), 15: (30, 66),
-}
 
 # Instruments whose natural register sits below the MC window: a note
 # that must fold UP a whole octave or more lands inside the melody's
@@ -189,7 +183,7 @@ def _events(path: Path):
 
 
 def _fold(key: int, instrument: int) -> int:
-    """Fold a key by octave into the instrument's comfortable range.
+    """Fold a key by octave into the Minecraft two-octave window.
 
     Keeps the pitch class: an out-of-range note becomes the nearest
     in-range note of the same pitch class, never a clamped wrong note.

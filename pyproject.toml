@@ -9,6 +9,9 @@ dependencies = [
     "pynbs>=1.1",
 ]
 
+[project.scripts]
+noteblockify = "main:main"
+
 # muscriptor pins torch<2.3 on Intel Macs. This project targets CUDA, so
 # skip that environment instead of lowering the torch floor.
 [tool.uv]

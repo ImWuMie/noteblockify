@@ -17,13 +17,9 @@ transcription needs the GPU (~5 GB VRAM, medium model).
 ## Converting audio to NBS
 
 ```bash
-uv run python main.py
-```
-
-Edit the constants at the top of `main.py`:
-
-```python
-AUDIO = Path("yuai.mp3")     # your input file (mp3/wav/flac)
+noteblockify --in song.mp3               # writes song.nbs
+noteblockify --in song.mp3 --out out.nbs # explicit output
+noteblockify --in song.mp3 --model small # lighter transcription model
 ```
 
 Steps performed:
@@ -40,21 +36,13 @@ First transcription takes ~2 minutes per 4 minutes of audio.
 One file:
 
 ```bash
-uv run python -c "from noteblockify.song import arrange; arrange('song.mid').save('song.nbs')"
+noteblockify --in song.mid
 ```
 
 A folder:
 
 ```bash
-uv run python -c "
-from pathlib import Path
-from noteblockify.song import arrange
-out = Path('out'); out.mkdir(exist_ok=True)
-for mid in Path('data/midi').glob('*.mid'):
-    song = arrange(mid)
-    song.save(out / (mid.stem + '.nbs'))
-    print(mid.name, len(song.notes), 'notes')
-"
+for f in data/midi/*.mid; do noteblockify --in "$f"; done
 ```
 
 Programmatic API:

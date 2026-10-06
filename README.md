@@ -41,18 +41,14 @@ MIDI file        ─────────────────────
 uv sync
 
 # Convert audio (transcribes with muscriptor first; needs ~5 GB VRAM)
-uv run python main.py            # expects yuai.mp3, or edit AUDIO in main.py
+noteblockify --in a.mp3 --out b.nbs  # explicit output path
+noteblockify --in song.mid           # MIDI converts directly, no GPU
+```
 
-# Convert a MIDI directly
-uv run python -c "from noteblockify.song import arrange; arrange('song.mid').save('song.nbs')"
+Batch-convert a folder:
 
-# Batch-convert a folder
-uv run python -c "
-from pathlib import Path
-from noteblockify.song import arrange
-for mid in Path('data/midi').glob('*.mid'):
-    arrange(mid).save(Path('out') / (mid.stem + '.nbs'))
-"
+```bash
+for f in data/midi/*.mid; do noteblockify --in "$f"; done
 ```
 
 The output `.nbs` plays in [Open Note Block Studio](https://opennbs.org/)
@@ -77,7 +73,7 @@ songs to `data/midi/` and retrain to specialize.
 | `noteblockify/song.py` | converter: OpenNBS maps, folding, layers, tempo |
 | `noteblockify/octave.py` | octave model, training, features |
 | `noteblockify/hear.py` | NBS→MIDI event scorer |
-| `main.py` | end-to-end audio→NBS entry point |
+| `main.py` | `noteblockify` CLI entry point |
 | `score_model.py` | model evaluation harness |
 
 `sounds/` contains the 16 vanilla instrument OGGs from OpenNBS (MIT)

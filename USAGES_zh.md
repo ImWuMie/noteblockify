@@ -15,13 +15,9 @@ uv sync
 ## 音频转 NBS
 
 ```bash
-uv run python main.py
-```
-
-改 `main.py` 顶部的常量：
-
-```python
-AUDIO = Path("yuai.mp3")     # 你的输入文件（mp3/wav/flac）
+noteblockify --in song.mp3               # 输出 song.nbs
+noteblockify --in song.mp3 --out out.nbs # 指定输出路径
+noteblockify --in song.mp3 --model small # 更小的转录模型
 ```
 
 执行步骤：
@@ -37,21 +33,13 @@ AUDIO = Path("yuai.mp3")     # 你的输入文件（mp3/wav/flac）
 单个文件：
 
 ```bash
-uv run python -c "from noteblockify.song import arrange; arrange('song.mid').save('song.nbs')"
+noteblockify --in song.mid
 ```
 
 整个目录：
 
 ```bash
-uv run python -c "
-from pathlib import Path
-from noteblockify.song import arrange
-out = Path('out'); out.mkdir(exist_ok=True)
-for mid in Path('data/midi').glob('*.mid'):
-    song = arrange(mid)
-    song.save(out / (mid.stem + '.nbs'))
-    print(mid.name, len(song.notes), 'notes')
-"
+for f in data/midi/*.mid; do noteblockify --in "$f"; done
 ```
 
 编程接口：

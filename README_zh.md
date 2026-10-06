@@ -28,18 +28,15 @@ MIDI 文件       ────────────────────�
 uv sync
 
 # 从音频转换（先用 muscriptor 转录；需要 ~5 GB 显存）
-uv run python main.py            # 默认读 yuai.mp3，改 main.py 里的 AUDIO 即可
+noteblockify --in a.mp3              # 输出 a.nbs 到输入旁
+noteblockify --in a.mp3 --out b.nbs  # 指定输出路径
+noteblockify --in song.mid           # MIDI 直接转换，无需 GPU
+```
 
-# 直接转换 MIDI
-uv run python -c "from noteblockify.song import arrange; arrange('song.mid').save('song.nbs')"
+批量转换整个目录：
 
-# 批量转换整个目录
-uv run python -c "
-from pathlib import Path
-from noteblockify.song import arrange
-for mid in Path('data/midi').glob('*.mid'):
-    arrange(mid).save(Path('out') / (mid.stem + '.nbs'))
-"
+```bash
+for f in data/midi/*.mid; do noteblockify --in "$f"; done
 ```
 
 输出的 `.nbs` 可以用 [Open Note Block Studio](https://opennbs.org/) 打开，
@@ -62,7 +59,7 @@ uv run python score_model.py             # 完整评测报告
 | `noteblockify/song.py` | 转换器：OpenNBS 映射、折叠、分层、tempo |
 | `noteblockify/octave.py` | 八度模型、训练、特征 |
 | `noteblockify/hear.py` | NBS→MIDI 事件评分器 |
-| `main.py` | 音频→NBS 端到端入口 |
+| `main.py` | `noteblockify` CLI 入口 |
 | `score_model.py` | 模型评测脚本 |
 
 `sounds/` 是 OpenNBS（MIT）的 16 个原版乐器 OGG，评分器和预览渲染使用。
