@@ -84,9 +84,31 @@ def _midi_events(midi_path: str | Path):
             next_key = prepared[idxs[n + 1]][2] if n + 1 < len(idxs) else key
             rows[i] = (inst, key, prev_key, next_key, events[i][3])
     shifts = _model_shifts(rows)
-    for (seconds, instrument, key), shift in zip(prepared, shifts):
+    # Majority-vote within each melodic channel, same as the converter.
+    votes = {}
+    for i, shift in enumerate(shifts):
+        ch = events[i][1]
+        if ch == 9:
+            continue
+        votes.setdefault(ch, {}).setdefault(shift, 0)
+        votes[ch][shift] += 1
+    winner = {c: max(counts, key=counts.get) for c, counts in votes.items()}
+    shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
+              for i, shift in enumerate(shifts)]
+    # Channel medians of in-window keys after the model shift: the
+    # centroid stragglers fold toward, same rule as the converter.
+    center: dict[int, int] = {}
+    keys_by_ch: dict[int, list[int]] = {}
+    for i, (_s, _inst, key) in enumerate(prepared):
+        keys_by_ch.setdefault(events[i][1], []).append(
+            max(0, min(87, key + 12 * shifts[i])))
+    for c, keys in keys_by_ch.items():
+        in_window = [k for k in keys if 33 <= k <= 57]
+        pool = in_window if in_window else keys
+        center[c] = sorted(pool)[len(pool) // 2]
+    for i, ((seconds, instrument, key), shift) in enumerate(zip(prepared, shifts)):
         shifted = max(0, min(87, key + 12 * shift))
-        folded = _fold(shifted, instrument)
+        folded = _fold(shifted, center[events[i][1]])
         # Same drop rule as the converter: bass folded up a whole octave
         # or more is expected to be deleted, not played.
         if instrument in _BASS and folded - shifted >= 12:

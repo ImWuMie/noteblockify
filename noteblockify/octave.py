@@ -122,11 +122,22 @@ def note_features(instrument: int, key: int, prev_key: int, next_key: int,
 
 
 class OctaveNet(nn.Module):
-    def __init__(self, dim: int = 64):
+    """Per-note octave shift predictor.
+
+    Upgraded capacity: 4 hidden layers at 256 wide (~200k parameters,
+    was ~5k) — the corpus has 65k notes and the old net underfit the
+    minority classes. BatchNorm between layers stabilizes the deeper
+    stack.
+    """
+
+    def __init__(self, dim: int = 256, in_features: int = 7):
         super().__init__()
+        self.in_features = in_features
         self.net = nn.Sequential(
-            nn.Linear(7, dim), nn.ReLU(),
-            nn.Linear(dim, dim), nn.ReLU(),
+            nn.Linear(in_features, dim), nn.BatchNorm1d(dim), nn.ReLU(),
+            nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(),
+            nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(),
+            nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(),
             nn.Linear(dim, len(SHIFTS)),
         )
 

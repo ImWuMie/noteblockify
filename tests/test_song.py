@@ -36,16 +36,16 @@ def make_midi(path, notes, tpb=480, tempo=500_000):
 
 def test_fold_hard_window():
     # Out-of-window keys fold by octave to the same pitch class.
-    assert FOLD_LO <= _fold(0, 0) <= FOLD_HI
-    assert FOLD_LO <= _fold(87, 0) <= FOLD_HI
+    assert FOLD_LO <= _fold(0) <= FOLD_HI
+    assert FOLD_LO <= _fold(87) <= FOLD_HI
     # In-window keys stay put.
     for k in (FOLD_LO, 45, FOLD_HI):
-        assert _fold(k, 0) == k
+        assert _fold(k) == k
 
 
 def test_fold_keeps_pitch_class():
     for key in range(88):
-        folded = _fold(key, 0)
+        folded = _fold(key)
         assert FOLD_LO <= folded <= FOLD_HI
         assert (folded - key) % 12 == 0
 

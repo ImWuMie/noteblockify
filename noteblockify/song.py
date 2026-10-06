@@ -182,21 +182,22 @@ def _events(path: Path):
     return events, programs, tpb, micsecqn
 
 
-def _fold(key: int, instrument: int) -> int:
+def _fold(key: int, center: int | None = None) -> int:
     """Fold a key by octave into the Minecraft two-octave window.
 
-    Keeps the pitch class: an out-of-range note becomes the nearest
-    in-range note of the same pitch class, never a clamped wrong note.
-    The window is the hard F#3..F#5 the vanilla game can actually play.
+    Keeps the pitch class. ``center`` is the voice's median: among the
+    in-window octaves of this key, the one landing closest to the voice
+    is chosen, so a phrase straddling the boundary stays contiguous
+    instead of jumping. Without a center, notes fold to the nearest
+    octave (the old behavior).
     """
-    lo, hi = FOLD_LO, FOLD_HI
-    if lo <= key <= hi:
-        return key
-    while key < lo:
-        key += 12
-    while key > hi:
-        key -= 12
-    return max(0, min(87, key))
+    options = [key + 12 * s for s in range(-8, 9)
+               if FOLD_LO <= key + 12 * s <= FOLD_HI]
+    if not options:
+        return max(FOLD_LO, min(FOLD_HI, key))
+    if center is None:
+        return min(options, key=lambda k: abs(k - key))
+    return min(options, key=lambda k: abs(k - center))
 
 
 def _model_shifts(rows: list[tuple[int, int, int, int, int]]) -> list[int]:
@@ -343,8 +344,30 @@ def arrange(midi_path: str | Path) -> pynbs.File:
             next_key = prepared[idxs[n + 1]][1] if n + 1 < len(idxs) else key
             rows[i] = (inst, key, prev_key, next_key, vel)
     shifts = _model_shifts(rows)
+    # The model decides per note, but octave placement is a per-voice
+    # decision: a split verdict (some notes +1, others 0) tears the line
+    # in half. Majority-vote within each melodic channel and apply the
+    # winning shift to every note of that channel.
+    votes: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for i, shift in enumerate(shifts):
+        if events[i][1] != 9:
+            votes[events[i][1]][shift] += 1
+    winner = {c: max(counts, key=counts.get)
+              for c, counts in votes.items()}
+    shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
+              for i, shift in enumerate(shifts)]
     prepared = [(inst, key + 12 * shift, vel)
                 for (inst, key, vel), shift in zip(prepared, shifts)]
+    # Each channel's post-shift median: the centroid out-of-window notes
+    # fold toward, keeping phrases contiguous across the boundary.
+    by_ch_keys: dict[int, list[int]] = {}
+    for i, (_inst, key, _vel) in enumerate(prepared):
+        by_ch_keys.setdefault(events[i][1], []).append(key)
+    center = {}
+    for c, keys in by_ch_keys.items():
+        in_window = [k for k in keys if FOLD_LO <= k <= FOLD_HI]
+        pool = in_window if in_window else keys
+        center[c] = sorted(pool)[len(pool) // 2]
     per_tick: dict[tuple[int, int], int] = defaultdict(int)
     for tick, (_, ch, *_rest) in zip(ticks, events):
         per_tick[(ch, tick)] += 1
@@ -361,7 +384,7 @@ def arrange(midi_path: str | Path) -> pynbs.File:
     dropped = 0
     for tick, (_pos, ch, _note, _vel), (instrument, key, vel) in zip(
             ticks, events, prepared):
-        folded = _fold(key, instrument)
+        folded = _fold(key, center[ch])
         # A bass note folded up a whole octave or more sits inside the
         # melody's register and muddies the mix; deleting it sounds
         # better than transposing it up.
