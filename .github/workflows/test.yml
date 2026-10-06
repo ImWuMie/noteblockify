@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      # Tests only exercise the MIDI->NBS path: no GPU, no muscriptor
+      # model download, no CUDA wheels needed. torch CPU from PyPI is
+      # enough for the octave model fallback.
+      - name: Install CPU torch and dependencies
+        run: |
+          uv add --dev pytest || true
+          uv sync --no-install-package muscriptor || true
+          uv pip install pytest mido pynbs
+
+      - name: Run smoke tests
+        run: python -m pytest tests/ -q
+
+      - name: Convert a synthetic MIDI end to end
+        run: |
+          python - <<'EOF'
+          import mido
+          from noteblockify.song import arrange
+
+          mid = mido.MidiFile(ticks_per_beat=480)
+          tr = mido.MidiTrack(); mid.tracks.append(tr)
+          tr.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
+          tr.append(mido.Message('note_on', channel=0, note=60, velocity=100, time=0))
+          tr.append(mido.Message(
+              'note_on', channel=9, note=36, velocity=100, time=240))
+          mid.save('_ci.mid')
+          song = arrange('_ci.mid')
+          song.save('_ci.nbs')
+          assert song.notes, 'conversion produced no notes'
+          print('CI conversion OK:', len(song.notes), 'notes')
+          EOF
