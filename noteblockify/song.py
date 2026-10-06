@@ -329,35 +329,78 @@ def _tempo_and_ticks(events, tpb, micsecqn, requested: float | None = None):
     return tempo, ticks
 
 
-def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
-            max_per_tick: int | None = None,
-            tempo: float | None = None) -> pynbs.File:
-    path = Path(midi_path)
-    events, programs, tpb, micsecqn, names = _events(path)
-    if not events:
-        song = pynbs.new_file(song_name=path.stem or "song",
-                              song_origin=path.name)
-        song.header.tempo = 10
-        return song
-
-    chosen_tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn, tempo)
-    tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn)
-
-    # Decide every note's instrument and raw key first, then ask the
-    # octave model for whole-octave shifts, then fold what remains
-    # out-of-range (a shift can only fix octave placement, folding keeps
-    # pitch class for anything still outside).
-    prepared = []
+def _build(path, events, programs, tpb, micsecqn, names, prepared,
+           chosen_tempo, ticks, center, octave_info):
+    """Assemble the pynbs song from per-note (instrument, key, vel)."""
     channels = sorted({e[1] for e in events})
-    choice = _diversify(programs, channels)
-    # Vocal override: channels whose muscriptor track name marks a vocal
-    # (voice/vocal/lead) get the requested vanilla instrument instead of
-    # the GM map's pick, and a velocity boost so the melody carries.
-    if vocal_instrument is not None:
-        for c in channels:
-            if c != 9 and any(word in names.get(c, "")
-                              for word in ("voice", "vocal", "lead")):
-                choice[c] = vocal_instrument
+    per_tick: dict[tuple[int, int], int] = defaultdict(int)
+    for tick, (_, ch, *_rest) in zip(ticks, events):
+        per_tick[(ch, tick)] += 1
+    height = {c: max((n for (cc, _t), n in per_tick.items() if cc == c),
+                     default=0) for c in channels}
+    prefix = {}
+    base_layer = 0
+    for c in channels:
+        prefix[c] = base_layer
+        base_layer += max(1, height[c])
+
+    occupied: set[tuple[int, int]] = set()
+    notes = []
+    for tick, (_pos, ch, _note, _vel), (instrument, key, vel) in zip(
+            ticks, events, prepared):
+        folded = _fold(key, center.get(ch))
+        # A bass note folded up a whole octave or more sits inside the
+        # melody's register and muddies the mix; deleting it sounds
+        # better than transposing it up.
+        if instrument in _BASS and folded - key >= 12:
+            continue
+        layer = prefix[ch]
+        while (tick, layer) in occupied:
+            layer += 1
+        occupied.add((tick, layer))
+        notes.append(pynbs.Note(
+            tick=tick, layer=layer, instrument=instrument, key=folded,
+            velocity=min(vel, 100), panning=0,
+        ))
+    notes.sort(key=lambda n: (n.tick, n.layer))
+    if not notes:
+        raise ValueError(f"{path.name}: every note was dropped folding "
+                         "into the Minecraft two-octave window")
+    enda = notes[-1].tick
+
+    spread = (45, -45, 25, -25, 55, -55)
+    pan: dict[int, int] = {}
+    for side, c in enumerate(c for c in channels if c != 9):
+        pan[c] = spread[side % len(spread)] if side else 0
+    if 9 in channels:
+        pan[9] = 0
+
+    name = path.stem.encode("cp1252", errors="ignore").decode("cp1252").strip()
+    song = pynbs.new_file(
+        song_name=name or "song",
+        song_origin=path.name.encode("ascii", "replace").decode(),
+    )
+    song.header.tempo = chosen_tempo
+    song.header.time_signature = 4
+    song.header.song_length = enda
+    song.header.song_layers = base_layer
+    song.notes = notes
+    song.layers = [
+        pynbs.Layer(
+            id=i,
+            name="Percussion" if c == 9 else _NAME[programs[c]],
+            panning=pan[c],
+        )
+        for c in channels
+        for i in range(prefix[c], prefix[c] + max(1, height[c]))
+    ]
+    song.octave_info = octave_info
+    return song
+
+
+def _prepared(events, programs, names, choice):
+    """(instrument, raw key, velocity) per event, before any shifting."""
+    prepared = []
     for pos, ch, note, vel in events:
         if ch == 9:
             instrument, key = _DRUM[note]
@@ -366,6 +409,51 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
             instrument = choice[ch]
             key = note - 21 + 12 * _PROGRAM[programs[ch]][1]
         prepared.append((instrument, key, vel))
+    return prepared
+
+
+def arrange_pre(midi_path: str | Path) -> pynbs.File:
+    """Stage 1 — pure conversion, nothing learned.
+
+    OpenNBS maps, per-note nearest-octave fold into the MC window, layer
+    bands, auto tempo. This is the baseline the model stage builds on.
+    """
+    path = Path(midi_path)
+    events, programs, tpb, micsecqn, names = _events(path)
+    if not events:
+        song = pynbs.new_file(song_name=path.stem or "song",
+                              song_origin=path.name)
+        song.header.tempo = 10
+        return song
+    chosen_tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn)
+    channels = sorted({e[1] for e in events})
+    choice = _diversify(programs, channels)
+    prepared = _prepared(events, programs, names, choice)
+    return _build(path, events, programs, tpb, micsecqn, names, prepared,
+                  chosen_tempo, ticks, {},
+                  {"model": False, "channels": {}})
+
+
+def arrange(midi_path: str | Path) -> pynbs.File:
+    """Stage 2 — the pre conversion plus octave-model fine-tuning.
+
+    The model predicts whole-octave shifts per note; a majority vote
+    makes the verdict per voice; centroid folding keeps phrases that
+    straddle the window boundary contiguous.
+    """
+    path = Path(midi_path)
+    events, programs, tpb, micsecqn, names = _events(path)
+    if not events:
+        song = pynbs.new_file(song_name=path.stem or "song",
+                              song_origin=path.name)
+        song.header.tempo = 10
+        return song
+
+    chosen_tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn)
+
+    channels = sorted({e[1] for e in events})
+    choice = _diversify(programs, channels)
+    prepared = _prepared(events, programs, names, choice)
     # Neighbour context per channel, exactly like the training oracle:
     # previous and next note in the same channel, by file order.
     where: dict[int, list[int]] = {}
@@ -390,7 +478,6 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
             votes[events[i][1]][shift] += 1
     winner = {c: max(counts, key=counts.get)
               for c, counts in votes.items()}
-    # Report how the octave decision was made: model in use, and the
     shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
               for i, shift in enumerate(shifts)]
     prepared = [(inst, key + 12 * shift, vel)
@@ -425,79 +512,5 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
         "model": (Path(__file__).resolve().parent.parent / "octave.pt").exists(),
         "channels": channels_report,
     }
-    per_tick: dict[tuple[int, int], int] = defaultdict(int)
-    for tick, (_, ch, *_rest) in zip(ticks, events):
-        per_tick[(ch, tick)] += 1
-    height = {c: max((n for (cc, _t), n in per_tick.items() if cc == c),
-                     default=0) for c in channels}
-    prefix = {}
-    base_layer = 0
-    for c in channels:
-        prefix[c] = base_layer
-        base_layer += max(1, height[c])
-
-    occupied: set[tuple[int, int]] = set()
-    notes = []
-    dropped = 0
-    tick_load: dict[int, int] = defaultdict(int)
-    for tick, (_pos, ch, _note, _vel), (instrument, key, vel) in zip(
-            ticks, events, prepared):
-        folded = _fold(key, center[ch])
-        # A bass note folded up a whole octave or more sits inside the
-        # melody's register and muddies the mix; deleting it sounds
-        # better than transposing it up.
-        if instrument in _BASS and folded - key >= 12:
-            dropped += 1
-            continue
-        # Density thinning: a wall of simultaneous noteblocks is mud.
-        # Notes arrive in event order, so the first channels through the
-        # band layout keep their place; later stacked extras go. Drums
-        # and voice are laid out first in typical files, so the parts
-        # that carry the song survive.
-        if max_per_tick is not None and tick_load[tick] >= max_per_tick:
-            dropped += 1
-            continue
-        tick_load[tick] += 1
-        key = folded
-        layer = prefix[ch]
-        while (tick, layer) in occupied:
-            layer += 1
-        occupied.add((tick, layer))
-        notes.append(pynbs.Note(
-            tick=tick, layer=layer, instrument=instrument, key=key,
-            velocity=min(vel, 100), panning=0,
-        ))
-    notes.sort(key=lambda n: (n.tick, n.layer))
-    if not notes:
-        raise ValueError(f"{path.name}: every note was dropped folding "
-                         "into the Minecraft two-octave window")
-    enda = notes[-1].tick
-
-    # Stereo: notes follow their layer; layers carry the field.
-    spread = (45, -45, 25, -25, 55, -55)
-    pan: dict[int, int] = {}
-    for side, c in enumerate(c for c in channels if c != 9):
-        pan[c] = spread[side % len(spread)] if side else 0
-    if 9 in channels:
-        pan[9] = 0
-
-    name = path.stem.encode("cp1252", errors="ignore").decode("cp1252").strip()
-    song = pynbs.new_file(
-        song_name=name or "song",
-        song_origin=path.name.encode("ascii", "replace").decode(),
-    )
-    song.header.tempo = chosen_tempo
-    song.header.time_signature = 4
-    song.header.song_length = enda
-    song.header.song_layers = base_layer
-    song.notes = notes
-    song.layers = [
-        pynbs.Layer(
-            id=i,
-            name="Percussion" if c == 9 else _NAME[programs[c]],
-            panning=pan[c],
-        )
-        for c in channels for i in range(prefix[c], prefix[c] + max(1, height[c]))
-    ]
-    song.octave_info = song_octave_info
-    return song
+    return _build(path, events, programs, tpb, micsecqn, names,
+                   prepared, chosen_tempo, ticks, center, song_octave_info)
