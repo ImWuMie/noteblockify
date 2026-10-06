@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="0-15",
         help="vanilla instrument for transcribed vocal tracks "
              "(voice/vocal/lead; 7=bell, 15=pling, 6=flute default)")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="print per-voice octave decisions and ranges")
     args = parser.parse_args(argv)
 
     source = Path(args.source)
@@ -72,11 +75,26 @@ def main(argv: list[str] | None = None) -> int:
     info = getattr(song, "octave_info", None)
     if info:
         if info["model"]:
-            verdicts = " ".join(f"ch{c}:{s:+d}" for c, s in info["channels"].items())
-            print(f"octave: model-assigned ({len(info['channels'])} voices: {verdicts})")
+            verdicts = " ".join(
+                f"ch{c}:{r['shift']:+d}"
+                for c, r in info["channels"].items() if r["shift"] or True)
+            print(f"octave: model-assigned, voices: {verdicts}")
         else:
             print("octave: no model file, pure folding (run "
                   "`uv run python -m noteblockify.octave` to train)")
+        if args.verbose:
+            print("voices:")
+            inst_names = ("harp", "bass", "basedrum", "snare", "hat",
+                          "guitar", "flute", "bell", "chime", "xylophone",
+                          "iron xylophone", "cow bell", "didgeridoo",
+                          "bit", "banjo", "pling")
+            for c, r in info["channels"].items():
+                inst = r["instrument"]
+                inst = inst_names[inst] if isinstance(inst, int) else inst
+                print(f"  ch{c} {r['name'][:18]:20s} -> {inst:12s} "
+                      f"{r['notes']:4d} notes  raw {r['raw_range'][0]:2d}-"
+                      f"{r['raw_range'][1]:2d}  shift {r['shift']:+d}  "
+                      f"final {r['final_range'][0]:2d}-{r['final_range'][1]:2d}")
     print(f"wrote {target} ({target.stat().st_size} bytes), "
           f"{len(song.notes)} notes, keys {min(keys)}-{max(keys)}, "
           f"tempo {song.header.tempo} tps, {song.header.song_layers} layers")

@@ -226,9 +226,8 @@ def _model_shifts(rows: list[tuple[int, int, int, int, int]]) -> list[int]:
         from noteblockify.octave import OctaveNet, SHIFTS
     except ImportError:
         return [0] * len(rows)
-    from pathlib import Path as _P
 
-    weights = _P(__file__).resolve().parent.parent / "octave.pt"
+    weights = Path(__file__).resolve().parent.parent / "octave.pt"
     if not weights.exists():
         return [0] * len(rows)
     model = getattr(_model_shifts, "cache", None)
@@ -359,6 +358,7 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
             prev_key = prepared[idxs[n - 1]][1] if n > 0 else key
             next_key = prepared[idxs[n + 1]][1] if n + 1 < len(idxs) else key
             rows[i] = (inst, key, prev_key, next_key, vel)
+    prepared_raw = [key for _inst, key, _vel in prepared]
     shifts = _model_shifts(rows)
     # The model decides per note, but octave placement is a per-voice
     # decision: a split verdict (some notes +1, others 0) tears the line
@@ -371,13 +371,6 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
     winner = {c: max(counts, key=counts.get)
               for c, counts in votes.items()}
     # Report how the octave decision was made: model in use, and the
-    # per-channel verdicts after the vote.
-    from pathlib import Path as _Path
-
-    song_octave_info = {
-        "model": (_Path(__file__).resolve().parent.parent / "octave.pt").exists(),
-        "channels": {c: winner[c] for c in sorted(winner)},
-    }
     shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
               for i, shift in enumerate(shifts)]
     prepared = [(inst, key + 12 * shift, vel)
@@ -392,6 +385,26 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None) -> pynbs
         in_window = [k for k in keys if FOLD_LO <= k <= FOLD_HI]
         pool = in_window if in_window else keys
         center[c] = sorted(pool)[len(pool) // 2]
+
+    # Report how the octave decision was made: model in use, per-channel
+    # verdicts, and each voice's trajectory through the pipeline.
+    channels_report = {}
+    for c in sorted({e[1] for e in events}):
+        idxs = [i for i, e in enumerate(events) if e[1] == c]
+        raw = [prepared_raw[i] for i in idxs]
+        final = [_fold(prepared[i][1], center.get(c)) for i in idxs]
+        channels_report[c] = {
+            "name": names.get(c, f"channel {c}"),
+            "instrument": choice.get(c, "drum kit"),
+            "notes": len(idxs),
+            "raw_range": (min(raw), max(raw)),
+            "shift": winner.get(c, 0),
+            "final_range": (min(final), max(final)),
+        }
+    song_octave_info = {
+        "model": (Path(__file__).resolve().parent.parent / "octave.pt").exists(),
+        "channels": channels_report,
+    }
     per_tick: dict[tuple[int, int], int] = defaultdict(int)
     for tick, (_, ch, *_rest) in zip(ticks, events):
         per_tick[(ch, tick)] += 1
