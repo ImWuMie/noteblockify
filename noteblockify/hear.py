@@ -1,21 +1,12 @@
-"""Score an NBS arrangement by mapping it back to MIDI and comparing notes.
+"""Score event fidelity against the raw converter mapping.
 
-The result NBS is read as note events — onset in seconds (tick / tempo),
-pitch as the key actually heard, instrument as the vanilla instrument —
-and matched one-to-one against the source MIDI's events. Onsets are
-compared in seconds; the tolerance absorbs the NBS tempo field's
-hundredth-of-a-tps quantization, which on long songs accumulates beyond
-any fixed window. Two measures:
-
-- Note F1 (weight 0.6): greedy one-to-one match within the time and
-  pitch tolerances.
-- Instrument agreement (weight 0.4): the fraction of matched pairs whose
-  vanilla instrument is the one the OpenNBS map prescribes for that MIDI
-  note.
-
-Both sides are compared in "heard pitch" space: the MIDI side passes
-through the same OpenNBS program/drum maps the importer used, so an
-octave shift the map prescribes is not an error.
+The pre file is intentionally the listening reference.  Its mapped MIDI
+keys are kept exactly, including keys outside Minecraft's playable window.
+The MC model may then move a key by whole octaves, so matching uses pitch
+class rather than absolute octave.  Timing and instrument are still matched
+one-to-one.  This score measures whether conversion preserved the musical
+events; it does not claim to judge whether one legal octave sounds better
+than another.
 """
 
 from __future__ import annotations
@@ -43,24 +34,17 @@ class Score:
         return sum(w * v for w, v in zip(WEIGHTS, (self.f1, self.instrument)))
 
 
-from noteblockify.song import (_BASS, _DRUM, _PROGRAM, _NAME, _diversify, _events,
-                      _fold, _model_shifts)
+from noteblockify.song import _DRUM, _PROGRAM, _diversify, _events
 
 
 def _midi_events(midi_path: str | Path):
-    """Source events as (seconds, key, instrument).
-
-    The same expectation path the converter uses: program/drum maps,
-    channel diversification, and range folding, so the score measures
-    conversion fidelity rather than rule disagreement.
-    """
+    """Source events as (seconds, key, instrument), before MC placement."""
     path = Path(midi_path)
     events, programs, tpb, usec, _names = _events(path)
     usec = usec or 500_000
     base = min(e[0] for e in events) if events else 0
     channels = sorted({e[1] for e in events})
     choice = _diversify(programs, channels)
-    prepared = []
     out = []
     for pos, ch, note, vel in events:
         seconds = (pos - base) * usec / 1e6 / tpb
@@ -71,49 +55,7 @@ def _midi_events(midi_path: str | Path):
             instrument, octave = _PROGRAM[programs[ch]]
             key = note - 21 + 12 * octave
             instrument = choice[ch]
-        prepared.append((seconds, instrument, key))
-    # Neighbour context per channel, mirroring the converter.
-    where: dict[int, list[int]] = {}
-    for i, _row in enumerate(prepared):
-        where.setdefault(events[i][1], []).append(i)
-    rows = [None] * len(prepared)
-    for idxs in where.values():
-        for n, i in enumerate(idxs):
-            _s, inst, key = prepared[i]
-            prev_key = prepared[idxs[n - 1]][2] if n > 0 else key
-            next_key = prepared[idxs[n + 1]][2] if n + 1 < len(idxs) else key
-            rows[i] = (inst, key, prev_key, next_key, events[i][3])
-    shifts = _model_shifts(rows)
-    # Majority-vote within each melodic channel, same as the converter.
-    votes = {}
-    for i, shift in enumerate(shifts):
-        ch = events[i][1]
-        if ch == 9:
-            continue
-        votes.setdefault(ch, {}).setdefault(shift, 0)
-        votes[ch][shift] += 1
-    winner = {c: max(counts, key=counts.get) for c, counts in votes.items()}
-    shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
-              for i, shift in enumerate(shifts)]
-    # Channel medians of in-window keys after the model shift: the
-    # centroid stragglers fold toward, same rule as the converter.
-    center: dict[int, int] = {}
-    keys_by_ch: dict[int, list[int]] = {}
-    for i, (_s, _inst, key) in enumerate(prepared):
-        keys_by_ch.setdefault(events[i][1], []).append(
-            max(0, min(87, key + 12 * shifts[i])))
-    for c, keys in keys_by_ch.items():
-        in_window = [k for k in keys if 33 <= k <= 57]
-        pool = in_window if in_window else keys
-        center[c] = sorted(pool)[len(pool) // 2]
-    for i, ((seconds, instrument, key), shift) in enumerate(zip(prepared, shifts)):
-        shifted = max(0, min(87, key + 12 * shift))
-        folded = _fold(shifted, center[events[i][1]])
-        # Same drop rule as the converter: bass folded up a whole octave
-        # or more is expected to be deleted, not played.
-        if instrument in _BASS and folded - shifted >= 12:
-            continue
-        out.append((seconds, folded, instrument))
+        out.append((seconds, key, instrument))
     return out
 
 
@@ -135,26 +77,27 @@ def _match(midi: list[tuple], nbs: list[tuple]):
     span = max((e[0] for e in free), default=0.0)
     tolerance = TIME_TOLERANCE + DRIFT_ALLOWANCE * span
     # Bucket source events by key for O(1) candidate lookup.
-    by_key: dict[int, list[tuple[float, int, int]]] = {}
+    # Bucket source events by pitch class. The MC model may change octave,
+    # but it must preserve pitch class.
+    by_class: dict[int, list[tuple[float, int, int]]] = {}
     order = {id(e): i for i, e in enumerate(free)}
     taken = [False] * len(free)
     for e in free:
-        by_key.setdefault(e[1], []).append((e[0], e[2], id(e)))
+        by_class.setdefault(e[1] % 12, []).append((e[0], e[2], id(e)))
     pairs = []
     for j, (t, k, i) in enumerate(nbs):
         best, best_cost = None, None
-        for mk in (k - PITCH_TOLERANCE, k, k + PITCH_TOLERANCE):
-            for mt, mi, eid in by_key.get(mk, []):
-                if mt > t + tolerance:
-                    continue
-                if abs(mt - t) > tolerance:
-                    continue
-                idx = order[eid]
-                if taken[idx]:
-                    continue
-                cost = abs(mt - t) + abs(mk - k) + 0.01 * (mi != i)
-                if best_cost is None or cost < best_cost:
-                    best, best_cost = (mt, mk, idx), cost
+        for mt, mi, eid in by_class.get(k % 12, []):
+            if mt > t + tolerance:
+                continue
+            if abs(mt - t) > tolerance:
+                continue
+            idx = order[eid]
+            if taken[idx]:
+                continue
+            cost = abs(mt - t) + 0.01 * (mi != i)
+            if best_cost is None or cost < best_cost:
+                best, best_cost = (mt, k, idx), cost
         if best is not None:
             taken[best[2]] = True
             pairs.append((free[best[2]], j))

@@ -2,20 +2,21 @@
 
 # noteblockify —— 音频/MIDI 转 Minecraft NBS
 
-把任意歌曲转换成 Minecraft 音符盒谱（.nbs），全部音符落在原版两个八度窗口（F♯3–F♯5）内，每个声部的八度归属由模型决定。
+把任意歌曲转换成 Minecraft 音符盒谱（.nbs），并明确分成“裸转换”和“MC 约束优化”两个阶段。
 
 流程：
 
 ```
-音频 (mp3/wav)  ──muscriptor 转录──▶  MIDI  ──noteblockify──▶  .nbs
-MIDI 文件       ───────────────────────────────▶  .nbs
+音频 ──muscriptor──▶ MIDI ──pre──▶ 裸 `.pre.nbs` ──model──▶ `.model.nbs`
+MIDI ───────────────────────────▶ 裸 `.pre.nbs`
 ```
 
 - **忠实复刻 OpenNBS 导入** —— 128 项 GM 音色映射、GM 鼓件映射、2x 时间精度网格、通道层带布局，全部照搬
   [OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio)（MIT），转换结果与 OpenNBS 手动导入听感一致。
-- **硬窗口处理** —— 每个音按八度折叠进键位 33–57；原版音符盒在此之外发不出声。
-- **模型决定八度归属** —— 小型加权 MLP（`octave.pt`）决定每个声部坐在哪个八度，标签从 MIDI 自身生成
-  （通道中位数按整八度对齐）。必须上折一整个八度以上才能进窗的低音直接删除，避免浑浊。
+- **裸转换基线** —— 只做 OpenNBS 的音色映射、时间网格、层、力度和声像；键位原样保留，超出 33–57 的音也不改。这是最还原的听感基准。
+- **MC 约束模型阶段** —— 读取已经落盘的 `.pre.nbs`，只改键位：保证全部进入 33–57；每个音都可以选择同音级的合法八度，动态规划让每个声部尽量保持稳定的八度路径，再保持原始音高距离和旋律线条，并按原始声部中位音高分层：低音声部固定在较低合法八度，避免多轨音乐全部折叠到中音区。
+- **可选音符编辑阶段** —— `--edit-candidates` 会为低音异常音生成有限的 `drop`、`replace` 和基于原始声部的 `add` 候选，供人工 A/B 听感标注；默认 key-only 模型不会自动删音。
+- **事件不可破坏** —— 不删除音符，不改 tick、乐器、层、力度或声像。
 - **零丢音** —— 通道层带按需增高，层冲突不再静默丢音。
 - **超长歌重网格** —— 超过 65535 tick 上限的歌按比例重排，而不是报错。
 - **立体声层声像** —— 层携带声场（音符跟随层），在立体声上拉开。
@@ -27,10 +28,14 @@ MIDI 文件       ────────────────────�
 ```bash
 uv sync
 
-# 从音频转换（先用 muscriptor 转录；需要 ~5 GB 显存）
-noteblockify --in a.mp3              # 输出 a.nbs 到输入旁
-noteblockify --in a.mp3 --out b.nbs  # 指定输出路径
+# 第一步：输出裸转换基线
+noteblockify --in a.mp3              # 输出 a.pre.nbs
 noteblockify --in song.mid           # MIDI 直接转换，无需 GPU
+# 第二步：读取已经生成的裸文件，做 MC 约束优化
+noteblockify --in a.pre.nbs --stage model  # 输出 a.model.nbs
+# 生成多种合法候选，供人工试听 A/B
+noteblockify --in a.pre.nbs --stage model --candidates \
+  --out candidates/
 ```
 
 批量转换整个目录：
@@ -43,24 +48,39 @@ for f in data/midi/*.mid; do noteblockify --in "$f"; done
 也可以放进 Meteor Client 的 NoteBot（`.minecraft/meteor-client/notebot/`）在游戏内播放。
 注意 Meteor 会丢弃音符力度和声像——哪些信息在游戏内保留，见 USAGES_zh.md。
 
-## 重训八度模型
+当前 MC 解码器先用硬约束生成合法候选，再由 PyTorch 偏好排序器选择候选。没有 `mc_ranker.pt` 时回退到 `balanced`。记录人工评价：
 
 ```bash
-uv run python -m noteblockify.octave              # 加权 MLP，GPU 约 25 秒
-uv run python score_model.py             # 完整评测报告
+noteblockify-feedback --data data/preferences.jsonl \
+  --pre song.pre.nbs \
+  --preferred candidates/song.high.nbs \
+  --rejected candidates/song.low.nbs \
+  --note "主旋律更清楚"
+noteblockify-train --data data/preferences.jsonl
 ```
 
-标签从 MIDI 自身派生——无需人工标注。往 `data/midi/` 加歌再重训即可定制。
+模型权重由人工 A/B 选择训练，不把自动规则伪装成听感真值。`pre` 文件始终保留，方便直接 A/B 评价。
+
+编辑候选单独使用 JSONL 偏好文件训练，允许候选音符数量不同：
+
+```bash
+noteblockify-feedback --data data/edit_preferences.jsonl \\
+  --pre song.pre.nbs \\
+  --preferred edit-candidates/song.replace.nbs \\
+  --rejected edit-candidates/song.drop.nbs
+noteblockify-train-edits --edit-data data/edit_preferences.jsonl \\
+  --output mc_edit_ranker.pt
+```
 
 ## 目录结构
 
 | 文件 | 职责 |
 |---|---|
 | `noteblockify/song.py` | 转换器：OpenNBS 映射、折叠、分层、tempo |
-| `noteblockify/octave.py` | 八度模型、训练、特征 |
+| `noteblockify/mc_model.py` | MC 音域约束优化器 |
 | `noteblockify/hear.py` | NBS→MIDI 事件评分器 |
 | `noteblockify/cli.py` | `noteblockify` CLI 入口 |
-| `score_model.py` | 模型评测脚本 |
+| `tests/test_song.py` | 转换器与 MC 约束不变量测试 |
 
 `sounds/` 是 OpenNBS（MIT）的 16 个原版乐器 OGG，评分器和预览渲染使用。
 

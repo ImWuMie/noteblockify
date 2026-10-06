@@ -11,6 +11,9 @@ dependencies = [
 
 [project.scripts]
 noteblockify = "noteblockify.cli:main"
+noteblockify-feedback = "noteblockify.feedback:main"
+noteblockify-train = "noteblockify.preference_model:main"
+noteblockify-train-edits = "noteblockify.edit_model:main"
 
 [build-system]
 requires = ["hatchling"]

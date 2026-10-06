@@ -17,17 +17,22 @@ transcription needs the GPU (~5 GB VRAM, medium model).
 ## Converting audio to NBS
 
 ```bash
-noteblockify --in song.mp3               # writes song.nbs
-noteblockify --in song.mp3 --out out.nbs # explicit output
-noteblockify --in song.mp3 --model small # lighter transcription model
+# Stage 1: raw converter baseline
+noteblockify --in song.mp3                  # writes song.pre.nbs
+noteblockify --in song.mp3 --out out.pre.nbs
+noteblockify --in song.mp3 --model small    # lighter transcription model
+# Stage 2: MC-constrained refinement of the saved baseline
+noteblockify --in song.pre.nbs --stage model # writes song.model.nbs
+# Generate legal alternatives for human A/B listening
+noteblockify --in song.pre.nbs --stage model --candidates --out candidates/
 ```
 
 Steps performed:
 
 1. muscriptor `medium` transcribes the audio to MIDI (cached: the .mid
    is reused if it already exists).
-2. `noteblockify.song.arrange` converts the MIDI to an NBS song.
-3. The result is saved next to the audio with a `.nbs` extension.
+2. `noteblockify.song.arrange_pre` converts the MIDI to a raw `.pre.nbs` song.
+3. `--stage model` reads the saved `.pre.nbs` and chooses legal same-pitch-class octaves with a voice-level continuity decoder.
 
 First transcription takes ~2 minutes per 4 minutes of audio.
 
@@ -48,19 +53,24 @@ for f in data/midi/*.mid; do noteblockify --in "$f"; done
 Programmatic API:
 
 ```python
-from noteblockify.song import arrange
+import pynbs
+from noteblockify.mc_model import refine
+from noteblockify.song import arrange_pre
 
-song = arrange("song.mid")     # returns pynbs.File
-song.save("song.nbs")
+pre = arrange_pre("song.mid")
+pre.save("song.pre.nbs")
+model = refine(pynbs.read("song.pre.nbs"))
+model.save("song.model.nbs")
 ```
 
 ## What the converter does to your music
 
 | Situation | Handling |
 |---|---|
-| Note outside F#3–F#5 | folded by octave to the nearest in-window pitch class |
-| Whole voice in a bad octave | octave model shifts it by ±1/±2 octaves |
-| Bass note needing +1 octave or more to fit | deleted (would muddy the melody register) |
+| Raw pre stage | preserves the mapped OpenNBS key, including out-of-window keys |
+| MC model stage | chooses legal same-pitch-class octaves for each voice, including alternate octaves for in-window notes |
+| Model objective | stable voice register, pitch-class preservation, local contour, and collision avoidance |
+| Notes, ticks, instruments, layers, velocity, panning | all preserved; no deletion |
 | GM program | mapped per the OpenNBS 128-entry table, with channel-level timbre diversification |
 | Drum channel (10) | mapped per the OpenNBS GM drum table |
 | More simultaneous notes than layers | extra layers are created — nothing dropped |
@@ -104,16 +114,31 @@ In-game limitations (verified against Meteor's decoder source):
    second, so sub-tick placement gets ±1 tick (~50 ms) rounding. All
    NBS files are subject to this.
 
-## Retraining the octave model
+## Model training
+
+The decoder first generates hard-valid candidates, then a PyTorch ranker
+chooses each note's legal octave inside a voice-level dynamic program. Lower
+raw-register voices receive lower legal targets, preventing dense songs such
+as multi-track arrangements from collapsing every bass part into the middle
+register. Without `mc_ranker.pt`, it falls back to the deterministic
+`balanced` candidate. MIDI-guided training runs on CUDA when available:
 
 ```bash
-uv run python -m noteblockify.octave        # trains on data/midi/*.mid, saves octave.pt
-uv run python score_model.py       # train-set, held-out, and conversion scores
+noteblockify-train --midi-guided data/flitered \\
+  --output mc_ranker.pt --width 192 --depth 4
+noteblockify-feedback --data data/preferences.jsonl \\
+  --pre song.pre.nbs \\
+  --preferred candidates/song.high.nbs \\
+  --rejected candidates/song.low.nbs \\
+  --note "clearer lead"
+noteblockify-train --data data/preferences.jsonl \\
+  --init mc_ranker.pt --output mc_ranker.pt
 ```
 
-The trained model ships as `octave.pt`; conversions use it out of
-the box. Retrain to specialize to your repertoire. Add MIDI files to
-`data/midi/` to specialize the model to your repertoire.
+The automatic objective favors MIDI proximity, contour preservation, and
+lower-register separation; it is not human truth. Human A/B labels remain
+the stronger signal when available. The pre file remains the unchanged
+listening baseline.
 
 ## Troubleshooting
 

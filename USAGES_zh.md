@@ -15,16 +15,21 @@ uv sync
 ## 音频转 NBS
 
 ```bash
-noteblockify --in song.mp3               # 输出 song.nbs
-noteblockify --in song.mp3 --out out.nbs # 指定输出路径
+# 第一阶段：输出裸转换基线
+noteblockify --in song.mp3               # 输出 song.pre.nbs
+noteblockify --in song.mp3 --out out.pre.nbs
 noteblockify --in song.mp3 --model small # 更小的转录模型
+# 第二阶段：读取裸文件并做 MC 约束优化
+noteblockify --in song.pre.nbs --stage model # 输出 song.model.nbs
+# 生成多个合法候选供人工 A/B
+noteblockify --in song.pre.nbs --stage model --candidates --out candidates/
 ```
 
 执行步骤：
 
 1. muscriptor `medium` 把音频转录成 MIDI（有缓存：.mid 已存在则直接复用）。
-2. `noteblockify.song.arrange` 把 MIDI 转成 NBS 谱。
-3. 结果保存在音频同目录、`.nbs` 后缀。
+2. `noteblockify.song.arrange_pre` 把 MIDI 转成裸 `.pre.nbs`。
+3. `--stage model` 读取已经落盘的 `.pre.nbs`，用声部连续性解码器为每个音选择同音级的合法八度。
 
 首次转录约每 4 分钟音频耗时 2 分钟。
 
@@ -45,19 +50,24 @@ for f in data/midi/*.mid; do noteblockify --in "$f"; done
 编程接口：
 
 ```python
-from noteblockify.song import arrange
+import pynbs
+from noteblockify.mc_model import refine
+from noteblockify.song import arrange_pre
 
-song = arrange("song.mid")     # 返回 pynbs.File
-song.save("song.nbs")
+pre = arrange_pre("song.mid")
+pre.save("song.pre.nbs")
+model = refine(pynbs.read("song.pre.nbs"))
+model.save("song.model.nbs")
 ```
 
 ## 转换器对你的音乐做了什么
 
 | 情况 | 处理方式 |
 |---|---|
-| 音符超出 F♯3–F♯5 | 按八度折叠到最近的窗口内同名音 |
-| 整个声部八度位置不佳 | 八度模型整体移动 ±1/±2 个八度 |
-| 低音需要上折一整个八度以上才进窗 | 删除（否则会浑浊旋律音区） |
+| 裸转换阶段 | 保留 OpenNBS 映射的原始键位，出窗音也不改 |
+| MC 约束阶段 | 每个声部选择合法的同音级八度，窗口内的音也可以切换到另一合法八度 |
+| 模型优化目标 | 最小化八度移动，保持声部局部旋律线，避免同拍同音 |
+| 音符、tick、乐器、层、力度、声像 | 全部保留，不删除 |
 | GM 音色 | 按 OpenNBS 128 项表映射，通道级音色差异化 |
 | 鼓通道（10） | 按 OpenNBS GM 鼓件表映射 |
 | 同时发声数超过层数 | 自动加层——零丢音 |
@@ -94,15 +104,26 @@ print(score.f1, score.instrument, score.total)   # 各 0..1
 - **时序抖动** —— Meteor 以 20 游戏刻/秒重算时间，亚 tick 放置会有 ±1 tick（约 50 ms）舍入。
   所有 NBS 文件都受此限制。
 
-## 重训八度模型
+## 模型训练
+
+解码器先生成硬约束合法候选，再由 PyTorch 排序器在声部动态规划中逐音选择。
+原始音域较低的声部会被分配到较低的合法八度，避免多轨歌曲的低音全部挤到中音区。
+没有 `mc_ranker.pt` 时回退到确定性的 `balanced` 候选。GPU 可用时自动使用 CUDA：
 
 ```bash
-uv run python -m noteblockify.octave        # 用 data/midi/*.mid 训练，存 octave.pt
-uv run python score_model.py       # 训练集、held-out、转换层三项分数
+noteblockify-train --midi-guided data/flitered \\
+  --output mc_ranker.pt --width 192 --depth 4
+noteblockify-feedback --data data/preferences.jsonl \\
+  --pre song.pre.nbs \\
+  --preferred candidates/song.high.nbs \\
+  --rejected candidates/song.low.nbs \\
+  --note "主旋律更清楚"
+noteblockify-train --data data/preferences.jsonl \\
+  --init mc_ranker.pt --output mc_ranker.pt
 ```
 
-训练好的模型随仓库附带（`octave.pt`），开箱即用；重训可适配你的曲库。
-往 `data/midi/` 加 MIDI 可以让模型适配你的曲库。
+自动目标结合 MIDI 接近度、旋律线条和低音分离，不等于人工听感真值；有人工
+A/B 标签时仍应继续训练。`.pre.nbs` 始终保留，作为不变的听感基线。
 
 ## 疑难解答
 

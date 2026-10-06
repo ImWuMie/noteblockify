@@ -21,10 +21,10 @@ yuai*.nbs
 .idea/
 .vscode/
 
-# Model checkpoints are artifacts, rebuild with `uv run python -m noteblockify.octave`
-# octave_tf.pt is an experiment artifact; the deployed weighted MLP ships.
-octave_tf.pt
-!octave.pt
+# Learned placement checkpoints are local artifacts.
+mc_model.pt
+mc_ranker*.pt
+mc_ranker*.json
 
 # OS
 Thumbs.db

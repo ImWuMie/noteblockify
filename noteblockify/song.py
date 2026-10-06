@@ -1,22 +1,9 @@
-"""Convert a MIDI file into the best-sounding NBS arrangement.
+"""Build the raw OpenNBS-compatible NBS baseline from MIDI.
 
-Built on the OpenNBS import (https://github.com/OpenNBS/NoteBlockStudio,
-MIT: scripts/midi_instruments maps, 2x precision grid, channel layer
-bands), then fixes the four places where that import loses music:
-
-1. Out-of-range pitches are folded by octave into the range the chosen
-   instrument actually covers, instead of being clamped to key 0/87 and
-   turning into a wrong, sour note.
-2. Thin instrument mapping: GM patches that share a vanilla instrument
-   are re-picked per channel so the ensemble uses the widest spread of
-   distinct vanilla sounds.
-3. Layer collisions: a channel whose notes pile up on one tick gets as
-   many layers as it needs (no note is ever dropped).
-4. Songs longer than the 65535-tick limit are re-gridded with a coarser
-   tempo that preserves onset order and relative spacing.
-
-Tempo is chosen so playback timing matches the MIDI within half a
-hundredth of a tick per second.
+This module deliberately does not perform Minecraft octave correction.
+``arrange_pre`` is the faithful converter stage: maps, timing, layers,
+velocity, panning, and raw mapped keys.  ``noteblockify.mc_model`` reads the
+saved pre file separately and applies the MC-only key constraint.
 """
 
 from __future__ import annotations
@@ -32,9 +19,8 @@ import pynbs
 MAX_TICK = 65534
 # NBS tempo field is hundredths of a tick per second.
 MIN_TEMPO, MAX_TEMPO = 0.25,1000
-# Vanilla note blocks cover two octaves per instrument comfortably.
+# MC's vanilla playable window; used by the constraint stage and tests.
 FOLD_LO, FOLD_HI = 33, 57
-
 # GM program -> (vanilla instrument, octave shift).
 # 0 harp, 1 bass, 2 basedrum, 3 snare, 4 hat, 5 guitar, 6 flute, 7 bell,
 # 8 chime, 9 xylophone, 10 iron xylophone, 11 cow bell, 12 didgeridoo,
@@ -147,11 +133,6 @@ _NAME = [
 
 
 # Instruments whose natural register sits below the MC window: a note
-# that must fold UP a whole octave or more lands inside the melody's
-# register and muddies the mix; deleting it sounds better.
-_BASS = {1, 12}
-
-
 def _events(path: Path):
     """Note events in file order: (pos, channel, note, velocity).
 
@@ -191,62 +172,14 @@ def _events(path: Path):
 
 
 def _fold(key: int, center: int | None = None) -> int:
-    """Fold a key by octave into the Minecraft two-octave window.
-
-    Keeps the pitch class. ``center`` is the voice's median: among the
-    in-window octaves of this key, the one landing closest to the voice
-    is chosen, so a phrase straddling the boundary stays contiguous
-    instead of jumping. Without a center, notes fold to the nearest
-    octave (the old behavior).
-    """
-    options = [key + 12 * s for s in range(-8, 9)
-               if FOLD_LO <= key + 12 * s <= FOLD_HI]
+    """Return the nearest same-pitch-class key in the MC test window."""
+    options = [key + 12 * shift for shift in range(-8, 9)
+               if FOLD_LO <= key + 12 * shift <= FOLD_HI]
     if not options:
         return max(FOLD_LO, min(FOLD_HI, key))
     if center is None:
-        return min(options, key=lambda k: abs(k - key))
-    return min(options, key=lambda k: abs(k - center))
-
-
-def _model_shifts(rows: list[tuple[int, int, int, int, int]]) -> list[int]:
-    """Predicted octave shift per note from octave.pt.
-
-    ``rows``: (instrument, key, prev_key, next_key, velocity) carrying the
-    same neighbour and velocity fields the training oracle used, so there
-    is no train/inference feature mismatch.
-
-    Falls back to zero shift when no model file exists. The loaded model
-    is cached; inference runs on the GPU when one is available.
-    """
-    if not rows:
-        return []
-    try:
-        import torch
-
-        from noteblockify.octave import OctaveNet, SHIFTS
-    except ImportError:
-        return [0] * len(rows)
-
-    weights = Path(__file__).resolve().parent.parent / "octave.pt"
-    if not weights.exists():
-        return [0] * len(rows)
-    model = getattr(_model_shifts, "cache", None)
-    if model is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = OctaveNet().to(device)
-        model.load_state_dict(
-            torch.load(weights, map_location=device))
-        model.eval()
-        _model_shifts.cache = model
-    device = next(model.parameters()).device
-    from noteblockify.octave import note_features
-
-    feats = [note_features(*row) for row in rows]
-    with torch.no_grad():
-        preds = model(
-            torch.tensor(feats, dtype=torch.float32, device=device)
-        ).argmax(-1)
-    return [SHIFTS[p] for p in preds.tolist()]
+        return min(options, key=lambda candidate: abs(candidate - key))
+    return min(options, key=lambda candidate: abs(candidate - center))
 
 
 def _diversify(programs: list[int], channels: list[int]) -> dict[int, int]:
@@ -329,9 +262,10 @@ def _tempo_and_ticks(events, tpb, micsecqn, requested: float | None = None):
     return tempo, ticks
 
 
-def _build(path, events, programs, tpb, micsecqn, names, prepared,
-           chosen_tempo, ticks, center, octave_info):
+def _build(path, events, programs, prepared, chosen_tempo, ticks,
+           octave_info):
     """Assemble the pynbs song from per-note (instrument, key, vel)."""
+
     channels = sorted({e[1] for e in events})
     per_tick: dict[tuple[int, int], int] = defaultdict(int)
     for tick, (_, ch, *_rest) in zip(ticks, events):
@@ -348,18 +282,12 @@ def _build(path, events, programs, tpb, micsecqn, names, prepared,
     notes = []
     for tick, (_pos, ch, _note, _vel), (instrument, key, vel) in zip(
             ticks, events, prepared):
-        folded = _fold(key, center.get(ch))
-        # A bass note folded up a whole octave or more sits inside the
-        # melody's register and muddies the mix; deleting it sounds
-        # better than transposing it up.
-        if instrument in _BASS and folded - key >= 12:
-            continue
         layer = prefix[ch]
         while (tick, layer) in occupied:
             layer += 1
         occupied.add((tick, layer))
         notes.append(pynbs.Note(
-            tick=tick, layer=layer, instrument=instrument, key=folded,
+            tick=tick, layer=layer, instrument=instrument, key=key,
             velocity=min(vel, 100), panning=0,
         ))
     notes.sort(key=lambda n: (n.tick, n.layer))
@@ -388,7 +316,8 @@ def _build(path, events, programs, tpb, micsecqn, names, prepared,
     song.layers = [
         pynbs.Layer(
             id=i,
-            name="Percussion" if c == 9 else _NAME[programs[c]],
+            name=(f"ch{c}: Percussion" if c == 9
+                  else f"ch{c}: {_NAME[programs[c]]}"),
             panning=pan[c],
         )
         for c in channels
@@ -408,15 +337,20 @@ def _prepared(events, programs, names, choice):
         else:
             instrument = choice[ch]
             key = note - 21 + 12 * _PROGRAM[programs[ch]][1]
+        # NBS stores keys as an unsigned byte and OpenNBS clamps its
+        # mapped key at the file boundary. This is serialization handling,
+        # not octave correction; pre still exposes the clamped raw key.
+        key = max(0, min(87, key))
         prepared.append((instrument, key, vel))
     return prepared
 
 
 def arrange_pre(midi_path: str | Path) -> pynbs.File:
-    """Stage 1 — pure conversion, nothing learned.
+    """Stage 1 — pure conversion, with raw mapped keys untouched.
 
-    OpenNBS maps, per-note nearest-octave fold into the MC window, layer
-    bands, auto tempo. This is the baseline the model stage builds on.
+    OpenNBS maps, tick grid, layer bands, and auto tempo only. Keys outside
+    Minecraft's playable window remain raw so this file is the listening
+    baseline for the model stage.
     """
     path = Path(midi_path)
     events, programs, tpb, micsecqn, names = _events(path)
@@ -429,88 +363,12 @@ def arrange_pre(midi_path: str | Path) -> pynbs.File:
     channels = sorted({e[1] for e in events})
     choice = _diversify(programs, channels)
     prepared = _prepared(events, programs, names, choice)
-    return _build(path, events, programs, tpb, micsecqn, names, prepared,
-                  chosen_tempo, ticks, {},
+    return _build(path, events, programs, prepared, chosen_tempo, ticks,
                   {"model": False, "channels": {}})
 
 
 def arrange(midi_path: str | Path) -> pynbs.File:
-    """Stage 2 — the pre conversion plus octave-model fine-tuning.
+    """Stage 2 compatibility helper: convert pre, then refine that file."""
+    from noteblockify.mc_model import refine
 
-    The model predicts whole-octave shifts per note; a majority vote
-    makes the verdict per voice; centroid folding keeps phrases that
-    straddle the window boundary contiguous.
-    """
-    path = Path(midi_path)
-    events, programs, tpb, micsecqn, names = _events(path)
-    if not events:
-        song = pynbs.new_file(song_name=path.stem or "song",
-                              song_origin=path.name)
-        song.header.tempo = 10
-        return song
-
-    chosen_tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn)
-
-    channels = sorted({e[1] for e in events})
-    choice = _diversify(programs, channels)
-    prepared = _prepared(events, programs, names, choice)
-    # Neighbour context per channel, exactly like the training oracle:
-    # previous and next note in the same channel, by file order.
-    where: dict[int, list[int]] = {}
-    for i, (_inst, _key, _vel) in enumerate(prepared):
-        where.setdefault(events[i][1], []).append(i)
-    rows = [None] * len(prepared)
-    for idxs in where.values():
-        for n, i in enumerate(idxs):
-            inst, key, vel = prepared[i]
-            prev_key = prepared[idxs[n - 1]][1] if n > 0 else key
-            next_key = prepared[idxs[n + 1]][1] if n + 1 < len(idxs) else key
-            rows[i] = (inst, key, prev_key, next_key, vel)
-    prepared_raw = [key for _inst, key, _vel in prepared]
-    shifts = _model_shifts(rows)
-    # The model decides per note, but octave placement is a per-voice
-    # decision: a split verdict (some notes +1, others 0) tears the line
-    # in half. Majority-vote within each melodic channel and apply the
-    # winning shift to every note of that channel.
-    votes: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-    for i, shift in enumerate(shifts):
-        if events[i][1] != 9:
-            votes[events[i][1]][shift] += 1
-    winner = {c: max(counts, key=counts.get)
-              for c, counts in votes.items()}
-    shifts = [shift if events[i][1] == 9 else winner[events[i][1]]
-              for i, shift in enumerate(shifts)]
-    prepared = [(inst, key + 12 * shift, vel)
-                for (inst, key, vel), shift in zip(prepared, shifts)]
-    # Each channel's post-shift median: the centroid out-of-window notes
-    # fold toward, keeping phrases contiguous across the boundary.
-    by_ch_keys: dict[int, list[int]] = {}
-    for i, (_inst, key, _vel) in enumerate(prepared):
-        by_ch_keys.setdefault(events[i][1], []).append(key)
-    center = {}
-    for c, keys in by_ch_keys.items():
-        in_window = [k for k in keys if FOLD_LO <= k <= FOLD_HI]
-        pool = in_window if in_window else keys
-        center[c] = sorted(pool)[len(pool) // 2]
-
-    # Report how the octave decision was made: model in use, per-channel
-    # verdicts, and each voice's trajectory through the pipeline.
-    channels_report = {}
-    for c in sorted({e[1] for e in events}):
-        idxs = [i for i, e in enumerate(events) if e[1] == c]
-        raw = [prepared_raw[i] for i in idxs]
-        final = [_fold(prepared[i][1], center.get(c)) for i in idxs]
-        channels_report[c] = {
-            "name": names.get(c, f"channel {c}"),
-            "instrument": choice.get(c, "drum kit"),
-            "notes": len(idxs),
-            "raw_range": (min(raw), max(raw)),
-            "shift": winner.get(c, 0),
-            "final_range": (min(final), max(final)),
-        }
-    song_octave_info = {
-        "model": (Path(__file__).resolve().parent.parent / "octave.pt").exists(),
-        "channels": channels_report,
-    }
-    return _build(path, events, programs, tpb, micsecqn, names,
-                   prepared, chosen_tempo, ticks, center, song_octave_info)
+    return refine(arrange_pre(midi_path))

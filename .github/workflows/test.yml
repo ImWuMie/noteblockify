@@ -16,9 +16,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Tests only exercise the MIDI->NBS path: no GPU, no muscriptor
-      # model download, no CUDA wheels needed. torch CPU from PyPI is
-      # enough for the octave model fallback.
+      # Tests exercise the MIDI -> raw pre -> MC-constrained model path:
+      # no GPU or muscriptor model download is needed.
       - name: Install CPU torch and dependencies
         run: |
           uv add --dev pytest || true
@@ -32,8 +31,6 @@ jobs:
         run: |
           python - <<'EOF'
           import mido
-          from noteblockify.song import arrange
-
           mid = mido.MidiFile(ticks_per_beat=480)
           tr = mido.MidiTrack(); mid.tracks.append(tr)
           tr.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
@@ -41,8 +38,16 @@ jobs:
           tr.append(mido.Message(
               'note_on', channel=9, note=36, velocity=100, time=240))
           mid.save('_ci.mid')
-          song = arrange('_ci.mid')
-          song.save('_ci.nbs')
-          assert song.notes, 'conversion produced no notes'
-          print('CI conversion OK:', len(song.notes), 'notes')
+          import pynbs
+          from noteblockify.mc_model import refine
+          from noteblockify.song import arrange_pre
+
+          pre = arrange_pre('_ci.mid')
+          pre.save('_ci.pre.nbs')
+          model = refine(pynbs.read('_ci.pre.nbs'))
+          model.save('_ci.model.nbs')
+          assert pre.notes, 'conversion produced no notes'
+          assert len(pre.notes) == len(model.notes)
+          assert all(33 <= note.key <= 57 for note in model.notes)
+          print('CI conversion OK:', len(pre.notes), 'notes')
           EOF

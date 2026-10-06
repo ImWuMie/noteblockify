@@ -11,11 +11,21 @@ import pynbs
 import pytest
 
 from noteblockify.hear import compare
+from noteblockify.mc_model import edit_candidates, refine, refine_candidates
+import noteblockify.mc_model as mc_model
+from noteblockify.preference_model import (
+    append_preference,
+    assignment_features,
+    candidate_score,
+    load_ranker,
+    train_preferences,
+)
 from noteblockify.song import (
     FOLD_HI,
     FOLD_LO,
     _fold,
     arrange,
+    arrange_pre,
 )
 
 
@@ -59,6 +69,137 @@ def test_all_keys_inside_mc_window(tmp_path):
     song = arrange(midi)
     assert song.notes
     assert all(FOLD_LO <= n.key <= FOLD_HI for n in song.notes)
+
+
+def test_pre_is_raw_and_model_only_applies_mc_constraints(tmp_path):
+    midi = make_midi(tmp_path / "raw.mid", [
+        (0, 0, 24, 100),   # mapped raw key 3; needs +3 octaves
+        (240, 0, 60, 90),  # mapped raw key 39; must not move
+        (480, 0, 96, 80),  # mapped raw key 75; needs -2 octaves
+    ])
+    pre = arrange_pre(midi)
+    model = refine(pre)
+
+    assert [note.key for note in pre.notes] == [3, 39, 75]
+    assert len(model.notes) == len(pre.notes)
+    assert all(FOLD_LO <= note.key <= FOLD_HI for note in model.notes)
+    for before, after in zip(pre.notes, model.notes):
+        assert (after.key - before.key) % 12 == 0
+        assert (before.tick, before.layer, before.instrument,
+                before.velocity, before.panning) == (
+                    after.tick, after.layer, after.instrument,
+                    after.velocity, after.panning)
+    assert model.notes[1].key == pre.notes[1].key
+
+
+def test_preference_candidates_are_hard_valid_and_scorable(tmp_path):
+    midi = make_midi(tmp_path / "candidates.mid", [
+        (0, 0, 24, 100),
+        (240, 0, 60, 90),
+        (480, 0, 96, 80),
+    ])
+    pre = arrange_pre(midi)
+    candidates = refine_candidates(pre)
+
+    assert "balanced" in candidates
+    assert len(candidates) >= 1
+    for candidate in candidates.values():
+        assert len(candidate.notes) == len(pre.notes)
+        assert all(FOLD_LO <= note.key <= FOLD_HI
+                   for note in candidate.notes)
+        assert assignment_features(pre, candidate)
+        assert candidate_score(None, pre, candidate) == 0.0
+        for before, after in zip(pre.notes, candidate.notes):
+            assert (after.key - before.key) % 12 == 0
+            assert (before.tick, before.layer, before.instrument,
+                    before.velocity, before.panning) == (
+                        after.tick, after.layer, after.instrument,
+                        after.velocity, after.panning)
+
+
+def test_preference_ranker_learns_an_ab_choice(tmp_path):
+    midi = make_midi(tmp_path / "train.mid", [
+        (0, 0, 24, 100),
+        (240, 0, 60, 90),
+        (480, 0, 96, 80),
+    ])
+    pre = arrange_pre(midi)
+    candidates = refine_candidates(pre)
+    preferred = tmp_path / "preferred.nbs"
+    rejected = tmp_path / "rejected.nbs"
+    pre_path = tmp_path / "pre.nbs"
+    pre.save(pre_path)
+    candidates["high"].save(preferred)
+    candidates["low"].save(rejected)
+    data = tmp_path / "preferences.jsonl"
+    append_preference(data, pre_path, preferred, rejected)
+
+    weights = tmp_path / "ranker.pt"
+    train_preferences(data, weights, steps=80)
+    ranker = load_ranker(weights)
+    assert ranker is not None
+    assert candidate_score(ranker, pre, candidates["high"]) > \
+        candidate_score(ranker, pre, candidates["low"])
+
+
+def test_edit_candidates_can_drop_or_replace_low_fold_jump(tmp_path):
+    midi = make_midi(tmp_path / "edit.mid", [
+        (0, 0, 61, 100),
+        (240, 0, 59, 100),
+        (480, 0, 52, 100),
+        (720, 0, 49, 100),
+    ])
+    pre = arrange_pre(midi)
+    candidates = edit_candidates(pre)
+    assert {"balanced", "drop", "replace"} <= candidates.keys()
+    assert len(candidates["drop"].notes) < len(pre.notes)
+    assert len(candidates["replace"].notes) == len(pre.notes)
+    for candidate in candidates.values():
+        assert all(FOLD_LO <= note.key <= FOLD_HI
+                   for note in candidate.notes)
+    if "add" in candidates:
+        add_path = tmp_path / "add.nbs"
+        candidates["add"].save(add_path)
+        parsed = pynbs.read(add_path)
+        assert len(parsed.notes) == len(candidates["add"].notes)
+        assert all(0 <= note.layer < len(parsed.layers)
+                   for note in parsed.notes)
+
+
+def test_ranked_decoder_can_mix_choices_per_note(tmp_path, monkeypatch):
+    midi = make_midi(tmp_path / "mix.mid", [
+        (0, 0, 24, 100),
+        (240, 0, 60, 90),
+        (480, 0, 96, 80),
+        (720, 1, 24, 100),
+        (960, 1, 60, 90),
+        (1200, 1, 96, 80),
+    ])
+    pre = arrange_pre(midi)
+    balanced = refine_candidates(pre)["balanced"]
+
+    class PreferMixed:
+        def eval(self):
+            return self
+
+    def fake_load(_path=None):
+        return PreferMixed()
+
+    def fake_scores(_model, song, index, candidate_keys, contexts=None):
+        # Alternate between high and low legal choices by source voice.
+        if mc_model._voice_id(song, song.notes[index]) == "ch0":
+            target = max(candidate_keys)
+        else:
+            target = min(candidate_keys)
+        return [1.0 if key == target else 0.0 for key in candidate_keys]
+
+    monkeypatch.setattr("noteblockify.preference_model.load_ranker", fake_load)
+    monkeypatch.setattr("noteblockify.preference_model.score_options", fake_scores)
+    mixed = mc_model.refine(pre)
+
+    assert all(FOLD_LO <= note.key <= FOLD_HI for note in mixed.notes)
+    assert len(mixed.notes) == len(pre.notes)
+    assert any(a.key != b.key for a, b in zip(balanced.notes, mixed.notes))
 
 
 def test_no_note_dropped_on_collisions(tmp_path):
