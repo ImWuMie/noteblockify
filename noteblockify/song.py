@@ -269,7 +269,7 @@ def _diversify(programs: list[int], channels: list[int]) -> dict[int, int]:
     return choice
 
 
-def _tempo_and_ticks(events, tpb, micsecqn):
+def _tempo_and_ticks(events, tpb, micsecqn, requested: float | None = None):
     """Choose tempo and place notes so timing matches the MIDI.
 
     Seconds-based placement with the stored (hundredth-quantized) tempo,
@@ -282,6 +282,23 @@ def _tempo_and_ticks(events, tpb, micsecqn):
     seconds = micsecqn * span / tpb / 1e6
     if seconds <= 0:
         return 10.0, [0] * len(events)
+
+    if requested is not None:
+        # Explicit tempo: grid every note onto the requested tps. The
+        # tempo field holds hundredths, so quantize; clamp so the song
+        # still fits the 16-bit length.
+        tempo = max(MIN_TEMPO, min(MAX_TEMPO, round(requested * 100) / 100))
+        ticks = [min(MAX_TICK, round((pos - base) * micsecqn / 1000000
+                                     / tpb * tempo))
+                 for pos, *_ in events]
+        if max(ticks) > MAX_TICK:
+            # Song too long for this tempo: fall back to the best fit.
+            fit = max(ticks) / seconds
+            tempo = max(MIN_TEMPO, min(tempo, round(fit * 100) / 100))
+            ticks = [min(MAX_TICK, round((pos - base) * micsecqn / 1000000
+                                         / tpb * tempo))
+                     for pos, *_ in events]
+        return tempo, ticks
 
 
     # Start from the OpenNBS beat grid (2x precision) and, if that does
@@ -313,7 +330,8 @@ def _tempo_and_ticks(events, tpb, micsecqn):
 
 
 def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
-            max_per_tick: int | None = None) -> pynbs.File:
+            max_per_tick: int | None = None,
+            tempo: float | None = None) -> pynbs.File:
     path = Path(midi_path)
     events, programs, tpb, micsecqn, names = _events(path)
     if not events:
@@ -322,6 +340,7 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
         song.header.tempo = 10
         return song
 
+    chosen_tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn, tempo)
     tempo, ticks = _tempo_and_ticks(events, tpb, micsecqn)
 
     # Decide every note's instrument and raw key first, then ask the
@@ -467,7 +486,7 @@ def arrange(midi_path: str | Path, vocal_instrument: int | None = None,
         song_name=name or "song",
         song_origin=path.name.encode("ascii", "replace").decode(),
     )
-    song.header.tempo = tempo
+    song.header.tempo = chosen_tempo
     song.header.time_signature = 4
     song.header.song_length = enda
     song.header.song_layers = base_layer

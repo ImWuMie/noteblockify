@@ -45,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="cap simultaneous notes per tick to thin dense transcriptions "
              "(default: 4; 0 disables)")
+    parser.add_argument(
+        "--tempo", dest="tempo", type=float, default=None, metavar="TPS",
+        help="ticks per second for the output song (default: auto-fit; "
+             "e.g. 60 for smoother timing in-game)")
     args = parser.parse_args(argv)
 
     source = Path(args.source)
@@ -70,7 +74,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         song = arrange(midi, vocal_instrument=args.vocal,
-                       max_per_tick=args.max_per_tick or None)
+                       max_per_tick=args.max_per_tick or None,
+                       tempo=args.tempo)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
